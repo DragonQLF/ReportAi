@@ -147,5 +147,8 @@ prisma/*.sqlite*
 *.claude.md
 CLAUDE.md
 
+# Internal docs
+product.md
+
 # Windows device file artifacts
 nul
