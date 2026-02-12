@@ -1,0 +1,30 @@
+# Auto-loaded by Docker alongside docker-compose.yml.
+# Overrides both services to use dev stages with hot reload.
+# Run: docker compose up
+
+services:
+  backend:
+    build:
+      target: dev
+    volumes:
+      # Mount source — ts-node-dev picks up changes without rebuilding the image
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      # Persist uploaded screenshots and generated PDFs across container restarts
+      - ./backend/data:/app/data
+    environment:
+      NODE_ENV: development
+
+  frontend:
+    build:
+      target: dev
+    volumes:
+      # Mount source — Next.js HMR picks up changes without rebuilding the image
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    environment:
+      NODE_ENV: development
+      # NEXT_PUBLIC_* vars are read at runtime in next dev (not baked at build time)
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      NEXT_PUBLIC_BETTER_AUTH_URL: http://localhost:4000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000

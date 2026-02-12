@@ -1,0 +1,123 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Better Auth tables ---
+
+model User {
+  id            String    @id
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Custom fields
+  plan          String    @default("free") // free, one_time, unlimited
+
+  sessions      Session[]
+  accounts      Account[]
+  reports       Report[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// --- Application tables ---
+
+model Report {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status      String   @default("pending") // pending, queued, processing, reviewing, writing, compiling, completed, failed
+  title       String?
+  company     String?
+  role        String?
+  dates       String?
+  techStack   String[]
+  description String?
+  language    String   @default("en")
+  style       String   @default("academic") // academic, professional, technical
+  font        String   @default("default")  // default, times, palatino, helvetica, charter
+
+  // Domain-specific extra fields collected by AI (e.g. specialty, medium, project type)
+  customFields Json    @default("{}")
+
+  // Chat history — persisted so users can return to the conversation
+  chatMessages Json    @default("[]")
+
+  // Pipeline state
+  frameCount   Int?
+  sectionCount Int?
+  currentStage String?
+  errorMessage String?
+
+  // Output
+  pdfUrl   String?
+  texUrl   String?
+  versions Json    @default("[]") // [{version, pdfUrl, texUrl, createdAt, label}]
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  screenshots Screenshot[]
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model Screenshot {
+  id          String  @id @default(cuid())
+  reportId    String
+  report      Report  @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  url         String // R2 URL
+  index       Int
+  feature     String? // AI-detected feature name
+  description String? // AI-generated description
+  section     String? // Assigned section name
+  excluded    Boolean @default(false)
+  blurScore   Float?
+  createdAt   DateTime @default(now())
+
+  @@index([reportId, index])
+}
