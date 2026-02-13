@@ -40,28 +40,19 @@ export async function reviewScreenshots(input: ReviewInput): Promise<ReviewOutpu
     duplicateThreshold,
   });
 
-  const results: ReviewResult[] = [];
-
-  // Step 1: Compute blur scores for all screenshots
-  const blurScores = await Promise.all(
+  // Compute blur score + perceptual hash in a single sharp decode per image.
+  // Previously done in two separate Promise.all passes (two decodes each); now one.
+  const analyzed = await Promise.all(
     screenshots.map(async (screenshot) => {
-      const score = await computeBlurScore(screenshot.imageBuffer);
-      return { ...screenshot, blurScore: score };
+      const { blurScore, hash } = await computeImageMetrics(screenshot.imageBuffer);
+      return { ...screenshot, blurScore, hash };
     }),
   );
 
-  // Step 2: Compute perceptual hashes for deduplication
-  const hashes = await Promise.all(
-    blurScores.map(async (screenshot) => {
-      const hash = await computePerceptualHash(screenshot.imageBuffer);
-      return { ...screenshot, hash };
-    }),
-  );
-
-  // Step 3: Mark blurry and duplicate screenshots
+  const results: ReviewResult[] = [];
   const seen: { hash: string; index: number }[] = [];
 
-  for (const screenshot of hashes) {
+  for (const screenshot of analyzed) {
     const isBlurry = screenshot.blurScore > blurThreshold;
 
     let isDuplicate = false;
@@ -108,7 +99,7 @@ export async function reviewScreenshots(input: ReviewInput): Promise<ReviewOutpu
     const lenientThreshold = Math.min(blurThreshold + 0.3, 1.0);
 
     const lenientResults = results.map((r) => {
-      const h = hashes.find((x) => x.id === r.screenshotId)!;
+      const h = analyzed.find((x) => x.id === r.screenshotId)!;
       const isBlurry = h.blurScore > lenientThreshold;
       return { ...r, keep: !isBlurry && !r.isDuplicate };
     });
@@ -135,19 +126,22 @@ export async function reviewScreenshots(input: ReviewInput): Promise<ReviewOutpu
 }
 
 /**
- * Compute a blur score for an image using Laplacian variance.
- * Returns a value between 0 (sharp) and 1 (very blurry).
+ * Compute blur score and perceptual hash in a single sharp decode.
+ *
+ * Decodes the image once to 256x256 grayscale for the Laplacian blur analysis,
+ * then re-uses that raw pixel data (resized to 8x8) for the perceptual hash —
+ * avoiding a second full decode of the original compressed image.
  */
-async function computeBlurScore(imageBuffer: Buffer): Promise<number> {
+async function computeImageMetrics(imageBuffer: Buffer): Promise<{ blurScore: number; hash: string }> {
   try {
-    // Convert to grayscale and get raw pixel data
-    const { data, info } = await sharp(imageBuffer)
+    // Decode once to 256x256 grayscale raw pixels
+    const { data: blurData, info } = await sharp(imageBuffer)
       .grayscale()
       .resize(256, 256, { fit: 'inside' })
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    // Compute Laplacian variance as a measure of sharpness
+    // Blur: Laplacian variance (high variance = sharp image = low score)
     const width = info.width;
     const height = info.height;
     let laplacianSum = 0;
@@ -157,57 +151,43 @@ async function computeBlurScore(imageBuffer: Buffer): Promise<number> {
       for (let x = 1; x < width - 1; x++) {
         const idx = y * width + x;
         const laplacian =
-          -data[idx - width] -
-          data[idx - 1] +
-          4 * data[idx] -
-          data[idx + 1] -
-          data[idx + width];
+          -blurData[idx - width] -
+          blurData[idx - 1] +
+          4 * blurData[idx] -
+          blurData[idx + 1] -
+          blurData[idx + width];
         laplacianSum += laplacian * laplacian;
         count++;
       }
     }
 
     const variance = laplacianSum / count;
+    const blurScore = Math.max(0, Math.min(1, 1 - variance / 1000));
 
-    // Normalize: high variance = sharp (low score), low variance = blurry (high score)
-    // Typical thresholds: variance < 100 is quite blurry
-    const normalizedScore = Math.max(0, Math.min(1, 1 - variance / 1000));
-
-    return normalizedScore;
-  } catch (error) {
-    logger.error('Failed to compute blur score', { error });
-    return 0; // Assume sharp on error (don't exclude)
-  }
-}
-
-/**
- * Compute a simple perceptual hash (average hash) for an image.
- * Returns a 64-char binary string (one bit per 8x8 pixel vs average).
- */
-async function computePerceptualHash(imageBuffer: Buffer): Promise<string> {
-  try {
-    // Resize to 8x8 grayscale
-    const { data } = await sharp(imageBuffer)
-      .grayscale()
+    // Hash: resize the already-decoded 256x256 raw data down to 8x8 — no second JPEG/PNG decode
+    const { data: hashData } = await sharp(blurData, {
+      raw: { width: info.width, height: info.height, channels: 1 },
+    })
       .resize(8, 8, { fit: 'fill' })
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    // Compute average pixel value
-    const avg = data.reduce((sum, val) => sum + val, 0) / data.length;
-
-    // Build hash: 1 if pixel >= average, 0 otherwise
-    // Return as 64-char binary string — do NOT convert via parseInt(), which loses
-    // precision for values > 2^53 (JavaScript's safe integer limit).
+    const avg = Array.from(hashData).reduce((sum, v) => sum + v, 0) / hashData.length;
     let hash = '';
-    for (let i = 0; i < data.length; i++) {
-      hash += data[i] >= avg ? '1' : '0';
+    for (let i = 0; i < hashData.length; i++) {
+      hash += hashData[i] >= avg ? '1' : '0';
     }
-    return hash;
+
+    return { blurScore, hash };
   } catch (error) {
-    logger.error('Failed to compute perceptual hash', { error });
-    // Return random 64-bit binary string so it won't match anything
-    return Array.from({ length: 64 }, () => (Math.random() < 0.5 ? '0' : '1')).join('');
+    logger.error('Failed to compute image metrics — treating as unreadable and excluding', { error });
+    // blurScore: 1.0 = maximally blurry on the inverted scale (0=sharp, 1=blurry).
+    // This ensures corrupt/unreadable buffers are excluded by the blur filter rather
+    // than silently passed to the vision stage where sharp would crash again.
+    return {
+      blurScore: 1.0,
+      hash: Array.from({ length: 64 }, () => (Math.random() < 0.5 ? '0' : '1')).join(''),
+    };
   }
 }
 

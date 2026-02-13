@@ -206,6 +206,7 @@ export async function runPipeline(reportId: string): Promise<void> {
         language: context.language,
         style: context.style,
         font: context.font,
+        customFields: context.customFields,
       },
     });
 

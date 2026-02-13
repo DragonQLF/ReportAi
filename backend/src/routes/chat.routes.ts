@@ -35,6 +35,7 @@ This tool works for anyone: interns, students, researchers, doctors, artists, en
 - Description (optional) — what is the project/work about
 - Language (optional, default "en") — one of: en, pt, fr, de, es
 - Writing style (optional, default "professional") — one of: professional, academic, technical
+- Font (optional, default "default") — one of: default, times, charter, palatino, calibri, arial. Only set if the user explicitly asks for a font.
 
 **Custom fields — use addCustomField for domain-specific information:**
 Based on what the user tells you about their domain, proactively add relevant fields:
@@ -202,7 +203,7 @@ router.post('/', requireAuth, async (req, res) => {
       if (existing) {
         const lines: string[] = [];
         if (existing.title)       lines.push(`- title: "${existing.title}"`);
-        if (existing.company)     lines.push(`- company: "${existing.company}"`);
+        if (existing.company)     lines.push(`- organization: "${existing.company}"`);
         if (existing.role)        lines.push(`- role: "${existing.role}"`);
         if (existing.dates)       lines.push(`- dates: "${existing.dates}"`);
         if (existing.description) lines.push(`- description: "${existing.description}"`);
@@ -254,7 +255,7 @@ router.post('/', requireAuth, async (req, res) => {
         setReportField: tool({
           description: 'Save a standard report field as you extract it from the conversation',
           inputSchema: z.object({
-            field: z.enum(['title', 'company', 'role', 'dates', 'techStack', 'description', 'language', 'style']),
+            field: z.enum(['title', 'company', 'role', 'dates', 'techStack', 'description', 'language', 'style', 'font']),
             value: z.string(),
           }),
           execute: async ({ field, value }) => {

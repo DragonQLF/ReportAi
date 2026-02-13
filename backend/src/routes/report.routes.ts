@@ -31,7 +31,7 @@ const createReportSchema = z.object({
   description: z.string().max(5000).optional(),
   language: z.enum(['en','pt','pt-br','es','fr','de','it','nl','pl','ru','el','cs','sk','hu','ro','tr','sv','no','da','fi']).default('en'),
   style: z.enum(['academic', 'professional', 'technical']).default('academic'),
-  font: z.enum(['default', 'times', 'palatino', 'helvetica', 'charter']).default('default'),
+  font: z.enum(['default', 'garamond', 'times', 'palatino', 'helvetica', 'charter', 'calibri', 'arial']).default('default'),
   customFields: z.record(customFieldValueSchema).default({}),
 });
 

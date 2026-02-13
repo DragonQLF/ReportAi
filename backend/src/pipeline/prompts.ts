@@ -79,7 +79,9 @@ Tasks:
 3. Suggest a report title
 4. Write a brief abstract (2-3 sentences)
 
-Each section should have a clear theme and contain related images. Sections should tell a coherent story about the work or project.`;
+Each section should have a clear theme and contain related images. Sections should tell a coherent story about the work or project.
+
+CRITICAL: The report template always generates a separate Introduction and Conclusion automatically. Never name any section "Introduction", "Conclusion", or any variation of those words (e.g. "Introduction: ...", "Overview and Introduction", "Final Conclusions"). Name sections after the specific feature, system, or topic they cover instead — e.g. "Public-Facing Website", "User Dashboard", "Authentication System".`;
 }
 
 // --- Writer prompts (Gemini Pro) ---
@@ -118,7 +120,7 @@ Write a detailed, well-structured section (300-600 words) that:
 4. Uses a ${context.style} tone throughout
 5. Includes appropriate depth for a ${context.style} report
 
-Output the section content as LaTeX-compatible text (no section headers — those will be added by the template). Use \\textbf{} for emphasis, \\texttt{} for technical terms or code, and itemize/enumerate environments where appropriate.
+Output the section content as LaTeX-compatible text (no section headers — those will be added by the template). Use \\textbf{} for emphasis, and itemize/enumerate environments where appropriate. Use \\texttt{} ONLY for actual code snippets, CLI commands, or discrete system values (e.g. PENDING, npm install). Do NOT wrap technology names, framework names, or library names in \\texttt{} — write Next.js, Express, TypeScript, BullMQ, Prisma, etc. as regular text.
 
 CRITICAL: Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, \\end{document}, \\maketitle, etc.). If showing code examples, wrap them in \\begin{verbatim}...\\end{verbatim}.`;
 }
@@ -155,7 +157,7 @@ Write 200-400 words covering:
 2. Objectives and scope
 3. Brief overview of what will be covered
 
-Use a ${context.style} tone. Output as LaTeX-compatible text. Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, etc.). Do NOT include a section title or heading — it is added by the template.`;
+Use a ${context.style} tone. Output as LaTeX-compatible text. Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, etc.). Do NOT include a section title or heading — it is added by the template. Do NOT wrap technology or library names in \\texttt{} — write Next.js, Express, TypeScript, etc. as regular text.`;
 }
 
 // --- Editor prompts (Gemini Pro) ---
@@ -219,19 +221,26 @@ Return your response in EXACTLY this format with no other text:
 export function conclusionPrompt(context: {
   projectName: string;
   sections: string[];
+  sectionSummaries?: { name: string; opening: string }[];
   style: string;
   language: string;
 }): string {
+  const contextBlock = context.sectionSummaries && context.sectionSummaries.length > 0
+    ? `Section summaries (opening of each written section):\n${
+        context.sectionSummaries.map((s) => `${s.name}:\n${s.opening}...`).join('\n\n')
+      }`
+    : `Sections covered: ${context.sections.join(', ')}`;
+
   return `Write a conclusion for a ${context.style} report about "${context.projectName}".
 
-Sections covered: ${context.sections.join(', ')}
+${contextBlock}
 Language: Write in ${languageName(context.language)}
 
 Write 150-300 words covering:
-1. Summary of work completed
+1. Summary of what was actually built and accomplished (draw from the section summaries above — be specific, not generic)
 2. Key achievements and contributions
 3. Lessons learned
 4. Potential future improvements or next steps
 
-Use a ${context.style} tone. Output as LaTeX-compatible text. Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, etc.). Do NOT include a section title or heading — it is added by the template.`;
+Use a ${context.style} tone. Output as LaTeX-compatible text. Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, etc.). Do NOT include a section title or heading — it is added by the template. Do NOT wrap technology or library names in \\texttt{} — write them as regular text.`;
 }

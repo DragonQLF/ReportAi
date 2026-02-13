@@ -88,7 +88,7 @@ See [`backend/.env.example`](./backend/.env.example) and [`frontend/.env.example
 | Database | Neon (Postgres) via Prisma |
 | Background Jobs | BullMQ + Redis |
 | Auth | Better Auth (Google OAuth) |
-| LaTeX | Cloud compile API |
+| LaTeX | pdflatex (texlive, bundled in Docker) |
 | Payments | Stripe |
 
 ---

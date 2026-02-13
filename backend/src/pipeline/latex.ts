@@ -29,6 +29,7 @@ interface LatexInput {
     language: string;
     style: string;
     font: string;
+    customFields?: Record<string, { label: string; value: string }>;
   };
 }
 
@@ -64,6 +65,7 @@ export async function generateLatex(input: LatexInput): Promise<LatexOutput> {
       screenshots,
       language: context.language,
       font: context.font,
+      customFields: context.customFields,
     });
 
     // Step 2 & 3: Compile PDF (upload .tex, compile, retry with AI fix if needed)
@@ -161,11 +163,17 @@ async function compilePdf(
     // Write .tex file
     await writeFile(path.join(tmpDir, 'report.tex'), texContent, 'utf-8');
 
-    // Write images as PNG (normalise to avoid WebP/format issues with pdflatex)
-    for (const { filename, buffer } of images) {
-      const pngBuffer = await sharp(buffer).png().toBuffer();
-      await writeFile(path.join(tmpDir, `${filename}.png`), pngBuffer);
-    }
+    // Convert all images to PNG in parallel (normalise to avoid WebP/format issues with pdflatex).
+    // Promise.allSettled ensures all promises settle before the finally block cleans up tmpDir —
+    // avoids dangling writeFile calls writing to a deleted directory if one conversion fails.
+    const conversions = await Promise.allSettled(
+      images.map(async ({ filename, buffer }) => {
+        const pngBuffer = await sharp(buffer).png().toBuffer();
+        await writeFile(path.join(tmpDir, `${filename}.png`), pngBuffer);
+      }),
+    );
+    const failed = conversions.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed) throw failed.reason;
 
     // Run pdflatex twice: first pass builds structure, second resolves TOC/refs
     await runPdflatex(tmpDir);
@@ -243,15 +251,18 @@ function buildLatexDocument(params: {
   screenshots: { index: number; url: string; feature: string; description: string }[];
   language: string;
   font: string;
+  customFields?: Record<string, { label: string; value: string }>;
 }): string {
-  const { title, company, role, dates, introduction, sections, conclusion, screenshots, language, font } = params;
+  const { title, company, role, dates, introduction, sections, conclusion, screenshots, language, font, customFields } = params;
 
   const fontPackage =
-    font === 'times'     ? '\\usepackage{times}\n' :
-    font === 'palatino'  ? '\\usepackage{palatino}\n' :
-    font === 'helvetica' ? '\\usepackage{helvet}\n\\renewcommand{\\familydefault}{\\sfdefault}\n' :
-    font === 'charter'   ? '\\usepackage{charter}\n' :
-    ''; // default = Computer Modern
+    font === 'times'      ? '\\usepackage{times}\n' :
+    font === 'helvetica'  ? '\\usepackage{helvet}\n\\renewcommand{\\familydefault}{\\sfdefault}\n' :
+    font === 'calibri'    ? '\\usepackage[sfdefault]{carlito}\n' :  // Carlito — free Calibri clone
+    font === 'arial'      ? '\\usepackage{helvet}\n\\renewcommand{\\familydefault}{\\sfdefault}\n' :
+    font === 'charter'    ? '\\usepackage{charter}\n' :
+    font === 'palatino'   ? '\\usepackage{palatino}\n' :
+    '\\usepackage[lining]{ebgaramond}\n'; // default: EB Garamond lining figures — lighter, widely used in European academia
 
   const LANG_MAP: Record<string, string> = {
     en: 'english',
@@ -287,7 +298,7 @@ function buildLatexDocument(params: {
     return `
 \\begin{figure}[H]
   \\centering
-  \\includegraphics[width=0.85\\textwidth]{screenshot_${idx}}
+  \\includegraphics[width=0.95\\textwidth]{screenshot_${idx}}
   \\caption{${escapeLatex(caption)}}
   \\label{fig:screenshot_${idx}}
 \\end{figure}`;
@@ -318,7 +329,7 @@ ${figures}`;
 ${fontPackage}
 \\usepackage{graphicx}
 \\usepackage{float}
-\\usepackage{hyperref}
+\\usepackage[hidelinks]{hyperref}
 \\usepackage{geometry}
 \\usepackage{fancyhdr}
 \\usepackage{setspace}
@@ -334,14 +345,9 @@ ${fontPackage}
 \\lhead{${escapeLatex(company)}}
 \\cfoot{\\thepage}
 
-\\title{${escapeLatex(title)}}
-\\author{${escapeLatex(role)}${company ? ` \\\\\\\\ ${escapeLatex(company)}` : ''}}
-\\date{${escapeLatex(dates)}}
-
 \\begin{document}
 
-\\maketitle
-\\newpage
+${buildCoverPage({ title, company, role, dates, customFields })}
 
 \\tableofcontents
 \\newpage
@@ -361,6 +367,63 @@ ${conclusion}
 
 \\end{document}
 `;
+}
+
+/**
+ * Build a clean titlepage for the report.
+ * Works for both professional/internship and academic/school contexts.
+ * Shows subject, supervisor, or other relevant custom fields when present.
+ */
+function buildCoverPage(params: {
+  title: string;
+  company: string;
+  role: string;
+  dates: string;
+  customFields?: Record<string, { label: string; value: string }>;
+}): string {
+  const { title, company, role, dates, customFields } = params;
+
+  const lines: string[] = [
+    '\\begin{titlepage}',
+    '  \\centering',
+    '  \\vspace*{5cm}',
+    `  {\\huge\\bfseries ${escapeLatex(title)}\\par}`,
+    '  \\vspace{0.8cm}',
+    '  \\noindent\\rule{0.5\\textwidth}{0.5pt}\\par',
+    '  \\vspace{1.8cm}',
+  ];
+
+  if (role) {
+    lines.push(`  {\\large ${escapeLatex(role)}\\par}`);
+    lines.push('  \\vspace{0.3cm}');
+  }
+  if (company) {
+    lines.push(`  {\\normalsize\\itshape ${escapeLatex(company)}\\par}`);
+  }
+
+  // Show all custom fields the chat AI decided to collect — it already filters to only
+  // domain-relevant fields, so no hardcoded allowlist needed here.
+  if (customFields) {
+    const coverEntries = Object.values(customFields).filter((f) => f.value);
+    if (coverEntries.length > 0) {
+      lines.push('  \\vspace{0.6cm}');
+      for (const entry of coverEntries) {
+        lines.push(`  {\\small\\textit{${escapeLatex(entry.label)}}: ${escapeLatex(entry.value)}\\par}`);
+        lines.push('  \\vspace{0.1cm}');
+      }
+    }
+  }
+
+  if (dates) {
+    lines.push('  \\vspace{1.5cm}');
+    lines.push(`  {\\normalsize ${escapeLatex(dates)}\\par}`);
+  }
+
+  lines.push('  \\vfill');
+  lines.push('  \\noindent\\rule{\\textwidth}{0.4pt}');
+  lines.push('\\end{titlepage}');
+
+  return lines.join('\n');
 }
 
 /** Escape special LaTeX characters in a string. */

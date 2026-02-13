@@ -42,7 +42,6 @@ export async function clusterScreenshots(input: ClusterInput): Promise<ClusterOu
 
     const result = await generateText({
       model: proModel,
-      // @ts-expect-error — Output.object deep type recursion with complex Zod schemas
       output: Output.object({ schema: clusterOutputSchema }),
       prompt,
     });

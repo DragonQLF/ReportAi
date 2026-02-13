@@ -77,6 +77,7 @@ export interface Report {
   description?: string;
   language: string;
   style: string;
+  font?: string;
   customFields?: Record<string, CustomFieldValue>;
   chatMessages?: unknown[];
   status: "pending" | "queued" | "reviewing" | "processing" | "writing" | "compiling" | "completed" | "failed";
@@ -155,30 +156,50 @@ export const api = {
   /**
    * Open an SSE connection for real-time pipeline status updates.
    * Returns a cleanup function that closes the connection.
+   * Auto-reconnects with exponential backoff on transient errors.
    */
   subscribeToReport: (
     id: string,
     onUpdate: (data: ReportStatus) => void,
     onError?: () => void,
   ): (() => void) => {
-    const es = new EventSource(`${API_URL}/api/reports/${id}/stream`, { withCredentials: true });
+    let es: EventSource | null = null;
+    let closed = false;
+    let retries = 0;
+    const MAX_RETRIES = 6;
 
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data) as ReportStatus;
-        onUpdate(data);
-        if (data.status === "completed" || data.status === "failed") {
-          es.close();
+    const connect = () => {
+      if (closed) return;
+      es = new EventSource(`${API_URL}/api/reports/${id}/stream`, { withCredentials: true });
+
+      es.onmessage = (e) => {
+        retries = 0; // reset backoff on successful message
+        try {
+          const data = JSON.parse(e.data) as ReportStatus;
+          onUpdate(data);
+          if (data.status === "completed" || data.status === "failed") {
+            closed = true;
+            es?.close();
+          }
+        } catch { /* ignore parse errors */ }
+      };
+
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        if (closed) return;
+        if (retries < MAX_RETRIES) {
+          const delay = Math.min(1000 * 2 ** retries, 30_000);
+          retries++;
+          setTimeout(connect, delay);
+        } else {
+          onError?.();
         }
-      } catch { /* ignore parse errors */ }
+      };
     };
 
-    es.onerror = () => {
-      onError?.();
-      es.close();
-    };
-
-    return () => es.close();
+    connect();
+    return () => { closed = true; es?.close(); };
   },
 
   // Screenshots

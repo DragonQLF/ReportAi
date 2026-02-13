@@ -59,7 +59,14 @@ if (config.storage.mode === 'local') {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(compression());
+app.use(compression({
+  // SSE connections must not be compressed — compression buffers the response body
+  // which prevents events from being flushed to the client in real time.
+  filter: (req, res) => {
+    if (req.headers.accept?.includes('text/event-stream')) return false;
+    return compression.filter(req, res);
+  },
+}));
 
 // --- Better Auth (handles /api/auth/* routes) ---
 app.all('/api/auth/*splat', toNodeHandler(auth));

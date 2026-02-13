@@ -31,6 +31,7 @@ export function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
   const [mounted, setMounted] = React.useState(false);
+  const [avatarError, setAvatarError] = React.useState(false);
 
   const handleNewReport = () => {
     if (pathname.startsWith("/reports/new")) {
@@ -113,10 +114,12 @@ export function Navbar() {
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full">
-                  {session.user.image ? (
+                  {session.user.image && !avatarError ? (
                     <img
                       src={session.user.image}
                       alt={session.user.name || "User"}
+                      referrerPolicy="no-referrer"
+                      onError={() => setAvatarError(true)}
                       className="h-7 w-7 rounded-full ring-2 ring-border"
                     />
                   ) : (
