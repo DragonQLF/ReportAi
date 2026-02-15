@@ -38,7 +38,7 @@ export type ReportStatus =
 export type UserPlan = 'free' | 'one_time' | 'unlimited';
 
 /** Report style union */
-export type ReportStyle = 'academic' | 'professional' | 'technical';
+export type ReportStyle = 'academic' | 'professional' | 'technical' | 'casual';
 
 /** Supported languages */
 export type SupportedLanguage = 'en' | 'pt' | 'es' | 'fr' | 'de';

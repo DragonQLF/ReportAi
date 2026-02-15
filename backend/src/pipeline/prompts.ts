@@ -1,10 +1,13 @@
 /**
- * Centralized prompt templates for all AI pipeline stages.
- * Version: 2.0.0
+ * Prompt loader — reads from external .md template files in /prompts/.
+ * Templates use {{placeholder}} syntax for dynamic values.
  *
- * Convention: Each prompt is a function that accepts context parameters
- * and returns a formatted string. This keeps prompts testable and versionable.
+ * Path resolution works for both dev (ts-node, __dirname = src/pipeline)
+ * and production (compiled, __dirname = dist/pipeline) — both resolve
+ * ../../prompts to backend/prompts/.
  */
+import { readFileSync } from 'fs';
+import path from 'path';
 
 type CustomFields = Record<string, { label: string; value: string }>;
 
@@ -14,12 +17,66 @@ function formatCustomFields(customFields?: CustomFields): string {
   return `\nAdditional context:\n${lines.join('\n')}`;
 }
 
+function styleDescription(style: string): string {
+  const map: Record<string, string> = {
+    professional: 'Tone: professional and business-appropriate — polished but not stiff. Think a well-written work report, not a corporate memo.',
+    academic:     'Tone: academic and formal, suitable for a university submission. Precise vocabulary, clear argumentation.',
+    technical:    'Tone: technical and implementation-focused. Prioritise accuracy and specificity over narrative flow. Be direct and concise.',
+    casual:       'Tone: casual and personal. Write like you are telling a friend about your work, then lightly cleaned up. Simple vocabulary, natural rhythm, first-person throughout. Must feel genuinely human — not like a formal report.',
+  };
+  return map[style] ?? `Tone: ${style}.`;
+}
+
 function languageName(lang: string): string {
-  return lang === 'pt' ? 'Brazilian Portuguese'
-    : lang === 'es' ? 'Spanish'
-    : lang === 'fr' ? 'French'
-    : lang === 'de' ? 'German'
-    : 'English';
+  const map: Record<string, string> = {
+    'en':    'English',
+    'pt':    'European Portuguese (Portugal)',
+    'pt-br': 'Brazilian Portuguese',
+    'es':    'Spanish',
+    'fr':    'French',
+    'de':    'German',
+    'it':    'Italian',
+    'nl':    'Dutch',
+    'pl':    'Polish',
+    'ru':    'Russian',
+    'el':    'Greek',
+    'cs':    'Czech',
+    'sk':    'Slovak',
+    'hu':    'Hungarian',
+    'ro':    'Romanian',
+    'tr':    'Turkish',
+    'sv':    'Swedish',
+    'no':    'Norwegian',
+    'da':    'Danish',
+    'fi':    'Finnish',
+  };
+  return map[lang?.toLowerCase()] ?? 'English';
+}
+
+const PROMPTS_DIR = path.join(__dirname, '../../prompts');
+
+function load(name: string): string {
+  return readFileSync(path.join(PROMPTS_DIR, `${name}.md`), 'utf-8');
+}
+
+// Eager load at startup — a missing file crashes immediately rather than at call time.
+const templates = {
+  screenshotAnalysis: load('screenshot-analysis'),
+  cluster: load('cluster'),
+  sectionWriter: load('section-writer'),
+  introduction: load('introduction'),
+  conclusion: load('conclusion'),
+  editSections: load('edit-sections'),
+  chatSystem: load('chat-system'),
+  editModeSystem: load('edit-mode-system'),
+  latexFix: load('latex-fix'),
+};
+
+function fill(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+    if (!(key in vars)) throw new Error(`Prompt template references unknown placeholder: {{${key}}}`);
+    return vars[key];
+  });
 }
 
 // --- Vision prompts (Gemini Flash) ---
@@ -28,25 +85,20 @@ export function screenshotAnalysisPrompt(context: {
   projectName: string;
   description: string;
   techStack: string[];
+  language: string;
   customFields?: CustomFields;
 }): string {
   const techLine = context.techStack.length > 0
     ? `\nTech Stack: ${context.techStack.join(', ')}`
     : '';
 
-  return `You are an expert analyst reviewing a screenshot from a project or work report.
-
-Project: ${context.projectName}
-Description: ${context.description || 'Not provided'}${techLine}${formatCustomFields(context.customFields)}
-
-Analyze this single screenshot and identify:
-1. The main feature or functionality being shown — give it a concise name (e.g. "User Authentication", "Dashboard Overview", "Payment Flow")
-2. A detailed description covering two things: (a) what is visible on screen, and (b) what the developer is DEMONSTRATING with this screenshot — the purpose of showing it, not just what's there
-3. Key UI elements present (buttons, forms, charts, modals, tables, navigation, etc.)
-4. If this appears to be part of a multi-step workflow, note which step and what the flow is
-5. Any technical or domain-specific details visible (API data, code, database output, configurations, etc.)
-
-Be specific and report-ready — your analysis will be used directly to write professional prose about this feature. Avoid generic descriptions like "the screen shows a form". Instead say what the form does, why it matters, and what it proves about the project.`;
+  return fill(templates.screenshotAnalysis, {
+    projectName: context.projectName,
+    description: context.description || 'Not provided',
+    techLine,
+    languageName: languageName(context.language),
+    customFields: formatCustomFields(context.customFields),
+  });
 }
 
 // --- Cluster prompts (Gemini Pro) ---
@@ -60,28 +112,19 @@ export function clusterPrompt(context: {
   customFields?: CustomFields;
   screenshotDescriptions: { index: number; feature: string; description: string }[];
 }): string {
-  return `You are a report architect. Given a set of analyzed images from a project or work report, group them into logical sections.
+  const screenshotsList = context.screenshotDescriptions
+    .map((s) => `[${s.index}] Feature: ${s.feature}\n    Description: ${s.description}`)
+    .join('\n\n');
 
-Project: ${context.projectName}
-Role: ${context.role || 'Professional'}
-Report Style: ${context.style}
-Language: ${context.language}
-Description: ${context.description || 'Not provided'}${formatCustomFields(context.customFields)}
-
-Images analyzed:
-${context.screenshotDescriptions
-  .map((s) => `[${s.index}] Feature: ${s.feature}\n    Description: ${s.description}`)
-  .join('\n\n')}
-
-Tasks:
-1. Group the images into 3-8 logical sections for a ${context.style} report
-2. Order sections in a logical narrative flow
-3. Suggest a report title
-4. Write a brief abstract (2-3 sentences)
-
-Each section should have a clear theme and contain related images. Sections should tell a coherent story about the work or project.
-
-CRITICAL: The report template always generates a separate Introduction and Conclusion automatically. Never name any section "Introduction", "Conclusion", or any variation of those words (e.g. "Introduction: ...", "Overview and Introduction", "Final Conclusions"). Name sections after the specific feature, system, or topic they cover instead — e.g. "Public-Facing Website", "User Dashboard", "Authentication System".`;
+  return fill(templates.cluster, {
+    projectName: context.projectName,
+    role: context.role || 'Professional',
+    style: context.style,
+    language: context.language,
+    description: context.description || 'Not provided',
+    customFields: formatCustomFields(context.customFields),
+    screenshotsList,
+  });
 }
 
 // --- Writer prompts (Gemini Pro) ---
@@ -97,32 +140,22 @@ export function sectionWriterPrompt(context: {
   language: string;
   customFields?: CustomFields;
 }): string {
-  return `You are a professional writer creating a ${context.style} report section.
+  const screenshotsList = context.screenshots
+    .map((s) => `Figure \\ref{fig:screenshot_${s.index}} — ${s.feature}\n   Description: ${s.description}`)
+    .join('\n\n');
 
-Project: ${context.projectName}
-Organization: ${context.company || 'Not specified'}
-Role: ${context.role || 'Professional'}
-Language: Write in ${languageName(context.language)}
-Style: ${context.style}${formatCustomFields(context.customFields)}
-
-Section: "${context.sectionName}"
-Section Purpose: ${context.sectionDescription}
-
-Images in this section:
-${context.screenshots
-  .map((s) => `Figure \\ref{fig:screenshot_${s.index}} — ${s.feature}\n   Description: ${s.description}`)
-  .join('\n\n')}
-
-Write a detailed, well-structured section (300-600 words) that:
-1. Explains what is shown in the images
-2. Discusses relevant decisions, methodology, or implementation approach
-3. References figures using the exact \\ref{fig:screenshot_INDEX} labels shown above — do not invent or renumber them
-4. Uses a ${context.style} tone throughout
-5. Includes appropriate depth for a ${context.style} report
-
-Output the section content as LaTeX-compatible text (no section headers — those will be added by the template). Use \\textbf{} for emphasis, and itemize/enumerate environments where appropriate. Use \\texttt{} ONLY for actual code snippets, CLI commands, or discrete system values (e.g. PENDING, npm install). Do NOT wrap technology names, framework names, or library names in \\texttt{} — write Next.js, Express, TypeScript, BullMQ, Prisma, etc. as regular text.
-
-CRITICAL: Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, \\end{document}, \\maketitle, etc.). If showing code examples, wrap them in \\begin{verbatim}...\\end{verbatim}.`;
+  return fill(templates.sectionWriter, {
+    style: context.style,
+    styleDescription: styleDescription(context.style),
+    projectName: context.projectName,
+    company: context.company || 'Not specified',
+    role: context.role || 'Professional',
+    languageName: languageName(context.language),
+    customFields: formatCustomFields(context.customFields),
+    sectionName: context.sectionName,
+    sectionDescription: context.sectionDescription,
+    screenshotsList,
+  });
 }
 
 export function introductionPrompt(context: {
@@ -141,81 +174,64 @@ export function introductionPrompt(context: {
     ? `\nTechnologies: ${context.techStack.join(', ')}`
     : '';
 
-  return `Write an introduction for a ${context.style} report.
-
-Project: ${context.projectName}
-Organization: ${context.company || 'Not specified'}
-Role: ${context.role || 'Professional'}
-Period: ${context.dates || 'Not specified'}${techLine}
-Description: ${context.description || 'Not provided'}
-Language: Write in ${languageName(context.language)}${formatCustomFields(context.customFields)}
-
-Report sections that follow: ${context.sections.join(', ')}
-
-Write 200-400 words covering:
-1. Context of the project, internship, or work
-2. Objectives and scope
-3. Brief overview of what will be covered
-
-Use a ${context.style} tone. Output as LaTeX-compatible text. Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, etc.). Do NOT include a section title or heading — it is added by the template. Do NOT wrap technology or library names in \\texttt{} — write Next.js, Express, TypeScript, etc. as regular text.`;
+  return fill(templates.introduction, {
+    style: context.style,
+    styleDescription: styleDescription(context.style),
+    projectName: context.projectName,
+    company: context.company || 'Not specified',
+    role: context.role || 'Professional',
+    dates: context.dates || 'Not specified',
+    techLine,
+    description: context.description || 'Not provided',
+    languageName: languageName(context.language),
+    customFields: formatCustomFields(context.customFields),
+    sections: context.sections.join(', '),
+  });
 }
 
-// --- Editor prompts (Gemini Pro) ---
+// --- Editor prompts (Gemini Flash) ---
 
-export function editDocumentPrompt(context: {
-  texContent: string;
+export function editSectionsPrompt(context: {
+  title: string;
+  company: string;
+  role: string;
+  language: string;
+  style: string;
   instruction: string;
+  sectionContent: {
+    introduction: string;
+    sections: { sectionName: string; content: string }[];
+    conclusion: string;
+  };
   chatHistory: { role: string; content: string }[];
   imageDescription?: string;
   imageFilename?: string;
-  reportContext: {
-    title?: string | null;
-    company?: string | null;
-    role?: string | null;
-    language: string;
-    style: string;
-  };
 }): string {
+  const parts: string[] = [
+    `[introduction]\n${context.sectionContent.introduction}`,
+    ...context.sectionContent.sections.map((s) => `[${s.sectionName}]\n${s.content}`),
+    `[conclusion]\n${context.sectionContent.conclusion}`,
+  ];
+
   const historyLines = context.chatHistory
     .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
     .join('\n');
 
   const imageSection = context.imageDescription && context.imageFilename
-    ? `\nThe user has attached an image. Description: ${context.imageDescription}\nIn LaTeX, reference it as \\includegraphics{${context.imageFilename}} (it will be available during compilation).`
+    ? `\nThe user has attached an image. Description: ${context.imageDescription}\nFilename for reference: ${context.imageFilename}`
     : '';
 
-  const historySection = historyLines
-    ? `\nPrevious edits in this session:\n${historyLines}\n`
-    : '';
-
-  return `You are a LaTeX document editor. You will make a targeted edit to the document below based on the user's instruction.
-
-Report context:
-- Title: ${context.reportContext.title || 'Unknown'}
-- Organization: ${context.reportContext.company || 'Unknown'}
-- Role: ${context.reportContext.role || 'Unknown'}
-- Language: ${context.reportContext.language}
-- Style: ${context.reportContext.style}
-${historySection}${imageSection}
-
-User instruction: "${context.instruction}"
-
-Current LaTeX document:
-${context.texContent}
-
-Rules:
-1. Make ONLY the changes needed to fulfill the instruction. Leave everything else exactly as-is.
-2. Preserve all \\usepackage, \\documentclass, \\begin{document}, \\end{document} and other structural commands.
-3. Preserve all \\label{} and \\ref{} commands exactly — do not renumber or rename them.
-4. If shortening prose, keep the section structure and figure references intact.
-5. If adding an image, use the exact filename provided (no extension needed for \\includegraphics).
-6. Keep all text in the document's language (${context.reportContext.language}).
-
-Return your response in EXACTLY this format with no other text:
-<summary>One sentence describing what you changed</summary>
-<tex>
-[complete modified LaTeX document]
-</tex>`;
+  return fill(templates.editSections, {
+    title: context.title || 'Unknown',
+    company: context.company || 'Unknown',
+    role: context.role || 'Unknown',
+    language: languageName(context.language),
+    styleDescription: styleDescription(context.style),
+    historySection: historyLines ? `\nPrevious edits in this session:\n${historyLines}\n` : '',
+    sectionsList: parts.join('\n\n---\n\n'),
+    instruction: context.instruction,
+    imageSection,
+  });
 }
 
 export function conclusionPrompt(context: {
@@ -231,16 +247,29 @@ export function conclusionPrompt(context: {
       }`
     : `Sections covered: ${context.sections.join(', ')}`;
 
-  return `Write a conclusion for a ${context.style} report about "${context.projectName}".
+  return fill(templates.conclusion, {
+    style: context.style,
+    styleDescription: styleDescription(context.style),
+    projectName: context.projectName,
+    contextBlock,
+    languageName: languageName(context.language),
+  });
+}
 
-${contextBlock}
-Language: Write in ${languageName(context.language)}
+// --- Chat prompts (Gemini Flash) ---
 
-Write 150-300 words covering:
-1. Summary of what was actually built and accomplished (draw from the section summaries above — be specific, not generic)
-2. Key achievements and contributions
-3. Lessons learned
-4. Potential future improvements or next steps
+export function chatSystemPrompt(): string {
+  return templates.chatSystem;
+}
 
-Use a ${context.style} tone. Output as LaTeX-compatible text. Never output document-level LaTeX commands (\\documentclass, \\usepackage, \\begin{document}, etc.). Do NOT include a section title or heading — it is added by the template. Do NOT wrap technology or library names in \\texttt{} — write them as regular text.`;
+export function editModeSystemPrompt(hasImage: boolean): string {
+  return fill(templates.editModeSystem, {
+    imageInstruction: hasImage ? '\n- An image is attached. Call editDocument to incorporate it.' : '',
+  });
+}
+
+// --- LaTeX fix prompt (Gemini Pro) ---
+
+export function latexFixPrompt(compilationError: string, texContent: string): string {
+  return fill(templates.latexFix, { compilationError, texContent });
 }

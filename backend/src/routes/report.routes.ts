@@ -9,6 +9,7 @@ import { reportQueue } from '../queue/report.queue';
 import { createSubscriber } from '../queue/connection';
 import { deleteStorageFile } from '../storage/screenshot-storage.service';
 import { editDocument as applyDocumentEdit } from '../pipeline/editor';
+import { onEditProgress } from '../utils/edit-progress';
 
 const router = Router();
 
@@ -30,7 +31,7 @@ const createReportSchema = z.object({
   techStack: z.array(z.string()).default([]),
   description: z.string().max(5000).optional(),
   language: z.enum(['en','pt','pt-br','es','fr','de','it','nl','pl','ru','el','cs','sk','hu','ro','tr','sv','no','da','fi']).default('en'),
-  style: z.enum(['academic', 'professional', 'technical']).default('academic'),
+  style: z.enum(['academic', 'professional', 'technical', 'casual']).default('academic'),
   font: z.enum(['default', 'garamond', 'times', 'palatino', 'helvetica', 'charter', 'calibri', 'arial']).default('default'),
   customFields: z.record(customFieldValueSchema).default({}),
 });
@@ -258,6 +259,10 @@ router.post(
         throw new ValidationError('Report must have at least one screenshot');
       }
 
+      if (!report.title || !report.company) {
+        throw new ValidationError('Report must have a title and organization before generating');
+      }
+
       // Mark as queued
       await prisma.report.update({
         where: { id: report.id },
@@ -397,6 +402,40 @@ router.get(
       cleanup();
       res.end();
     }, 10 * 60 * 1000);
+
+    req.on('close', cleanup);
+  },
+);
+
+/** GET /api/reports/:id/edit-progress — SSE stream for real-time edit stage updates */
+router.get(
+  '/:id/edit-progress',
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const id = param(req, 'id');
+    try {
+      const report = await prisma.report.findUnique({ where: { id }, select: { userId: true } });
+      if (!report) return next(new NotFoundError('Report'));
+      if (report.userId !== req.user!.id) return next(new ForbiddenError('You do not own this report'));
+    } catch (err) {
+      return next(err);
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const unsubscribe = onEditProgress(id, (stage) => {
+      res.write(`data: ${JSON.stringify({ stage })}\n\n`);
+    });
+
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), 30_000);
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
 
     req.on('close', cleanup);
   },

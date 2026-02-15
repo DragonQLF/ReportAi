@@ -7,7 +7,9 @@ import { generateText } from 'ai';
 import { logger } from '../utils/logger';
 import { PipelineError } from '../utils/errors';
 import { uploadOutput } from '../storage/screenshot-storage.service';
+import { cacheScreenshotPng } from '../utils/screenshot-cache';
 import { proModel } from './ai';
+import { latexFixPrompt } from './prompts';
 import type { WriterOutput, Section, LatexOutput } from './schemas';
 
 interface LatexInput {
@@ -141,6 +143,8 @@ export async function compileLatexDocument(
         filename: `${filePrefix}.pdf`,
         contentType: 'application/pdf',
       });
+    } else if (second.error) {
+      logger.error('PDF compilation failed after AI fix', { reportId, error: second.error });
     }
   }
 
@@ -169,7 +173,9 @@ async function compilePdf(
     const conversions = await Promise.allSettled(
       images.map(async ({ filename, buffer }) => {
         const pngBuffer = await sharp(buffer).png().toBuffer();
-        await writeFile(path.join(tmpDir, `${filename}.png`), pngBuffer);
+        await writeFile(path.join(tmpDir!, `${filename}.png`), pngBuffer);
+        // Cache the converted PNG so edits don't need to re-fetch from R2 + re-convert
+        cacheScreenshotPng(reportId, filename, pngBuffer).catch(() => {});
       }),
     );
     const failed = conversions.find((r): r is PromiseRejectedResult => r.status === 'rejected');
@@ -202,19 +208,7 @@ async function compilePdf(
 async function fixLatexWithAI(texContent: string, compilationError: string): Promise<string> {
   const { text } = await generateText({
     model: proModel,
-    prompt: `A LaTeX document failed to compile with the following error:
-
---- ERROR ---
-${compilationError}
---- END ERROR ---
-
---- DOCUMENT ---
-${texContent}
---- END DOCUMENT ---
-
-Fix the LaTeX document so it compiles correctly. The most common cause is document-level commands (\\documentclass, \\usepackage, \\begin{document}, \\end{document}) appearing inside the document body — these must be removed or wrapped in a verbatim environment.
-
-Return ONLY the corrected LaTeX source. No explanation, no markdown fences, no extra text.`,
+    prompt: latexFixPrompt(compilationError, texContent),
   });
 
   // Strip markdown code fences if the model added them anyway
@@ -240,7 +234,7 @@ function runPdflatex(cwd: string): Promise<void> {
 /**
  * Build a complete LaTeX document string from the report components.
  */
-function buildLatexDocument(params: {
+export function buildLatexDocument(params: {
   title: string;
   company: string;
   role: string;
@@ -266,7 +260,7 @@ function buildLatexDocument(params: {
 
   const LANG_MAP: Record<string, string> = {
     en: 'english',
-    pt: 'portuges',
+    pt: 'portuguese',
     'pt-br': 'brazilian',
     es: 'spanish',
     fr: 'french',
@@ -287,6 +281,30 @@ function buildLatexDocument(params: {
     fi: 'finnish',
   };
   const langPackage = LANG_MAP[language?.toLowerCase()?.trim()] ?? 'english';
+
+  const SECTION_LABELS: Record<string, { introduction: string; conclusion: string }> = {
+    en:    { introduction: 'Introduction',  conclusion: 'Conclusion' },
+    pt:    { introduction: 'Introdução',    conclusion: 'Conclusão' },
+    'pt-br': { introduction: 'Introdução', conclusion: 'Conclusão' },
+    es:    { introduction: 'Introducción',  conclusion: 'Conclusión' },
+    fr:    { introduction: 'Introduction',  conclusion: 'Conclusion' },
+    de:    { introduction: 'Einleitung',    conclusion: 'Schlussfolgerung' },
+    it:    { introduction: 'Introduzione',  conclusion: 'Conclusione' },
+    nl:    { introduction: 'Inleiding',     conclusion: 'Conclusie' },
+    pl:    { introduction: 'Wstęp',         conclusion: 'Podsumowanie' },
+    ru:    { introduction: 'Введение',      conclusion: 'Заключение' },
+    el:    { introduction: 'Εισαγωγή',      conclusion: 'Συμπέρασμα' },
+    cs:    { introduction: 'Úvod',          conclusion: 'Závěr' },
+    sk:    { introduction: 'Úvod',          conclusion: 'Záver' },
+    hu:    { introduction: 'Bevezetés',     conclusion: 'Összefoglalás' },
+    ro:    { introduction: 'Introducere',   conclusion: 'Concluzie' },
+    tr:    { introduction: 'Giriş',         conclusion: 'Sonuç' },
+    sv:    { introduction: 'Inledning',     conclusion: 'Slutsats' },
+    no:    { introduction: 'Innledning',    conclusion: 'Konklusjon' },
+    da:    { introduction: 'Introduktion',  conclusion: 'Konklusion' },
+    fi:    { introduction: 'Johdanto',      conclusion: 'Yhteenveto' },
+  };
+  const sectionLabels = SECTION_LABELS[language?.toLowerCase()?.trim()] ?? SECTION_LABELS.en;
 
   // Build figure commands for each screenshot
   const figureForIndex = (idx: number): string => {
@@ -355,13 +373,13 @@ ${buildCoverPage({ title, company, role, dates, customFields })}
 \\listoffigures
 \\newpage
 
-\\section{Introduction}
+\\section{${sectionLabels.introduction}}
 
 ${introduction}
 
 ${sectionContent}
 
-\\section{Conclusion}
+\\section{${sectionLabels.conclusion}}
 
 ${conclusion}
 

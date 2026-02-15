@@ -1,7 +1,7 @@
 import { generateText, Output } from 'ai';
 import { clusterOutputSchema } from './schemas';
 import { clusterPrompt } from './prompts';
-import { proModel } from './ai';
+import { flashModel } from './ai';
 import { logger } from '../utils/logger';
 import { PipelineError } from '../utils/errors';
 import type { ClusterOutput, ScreenshotAnalysisItem } from './schemas';
@@ -41,7 +41,7 @@ export async function clusterScreenshots(input: ClusterInput): Promise<ClusterOu
     });
 
     const result = await generateText({
-      model: proModel,
+      model: flashModel,
       output: Output.object({ schema: clusterOutputSchema }),
       prompt,
     });

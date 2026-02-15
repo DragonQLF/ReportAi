@@ -94,9 +94,10 @@ model Report {
   errorMessage String?
 
   // Output
-  pdfUrl   String?
-  texUrl   String?
-  versions Json    @default("[]") // [{version, pdfUrl, texUrl, createdAt, label}]
+  pdfUrl         String?
+  texUrl         String?
+  versions       Json    @default("[]") // [{version, pdfUrl, texUrl, createdAt, label}]
+  sectionContent Json?   // Structured prose sections saved after generation for fast AI editing
 
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt

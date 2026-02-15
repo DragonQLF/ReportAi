@@ -104,6 +104,7 @@ export async function runPipeline(reportId: string): Promise<void> {
         projectName: context.title ?? 'Untitled Project',
         description: context.description ?? '',
         techStack: context.techStack,
+        language: context.language ?? 'en',
         customFields: context.customFields,
       },
     });
@@ -211,6 +212,21 @@ export async function runPipeline(reportId: string): Promise<void> {
     });
 
     // ===== Stage 5: Mark completed =====
+    // Build structured sectionContent from writer + cluster output so edits
+    // can target prose sections directly without fetching and round-tripping the full .tex
+    const sectionContent = {
+      introduction: writerOutput.introduction,
+      sections: writerOutput.sections.map((sc) => {
+        const cluster = clusterOutput.sections.find((s) => s.name === sc.sectionName);
+        return {
+          sectionName: sc.sectionName,
+          content: sc.content,
+          screenshotIndices: cluster?.screenshotIndices ?? [],
+        };
+      }),
+      conclusion: writerOutput.conclusion,
+    };
+
     const completed = await prisma.report.update({
       where: { id: reportId },
       data: {
@@ -218,6 +234,7 @@ export async function runPipeline(reportId: string): Promise<void> {
         currentStage: 'completed',
         pdfUrl: latexOutput.pdfUrl,
         texUrl: latexOutput.texUrl,
+        sectionContent,
       },
       select: { status: true, currentStage: true, frameCount: true, sectionCount: true, errorMessage: true, pdfUrl: true, texUrl: true },
     });

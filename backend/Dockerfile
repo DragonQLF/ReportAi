@@ -9,6 +9,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     texlive-latex-extra \
     texlive-fonts-recommended \
     texlive-fonts-extra \
+    texlive-lang-european \
+    texlive-lang-portuguese \
+    texlive-lang-french \
+    texlive-lang-german \
+    texlive-lang-spanish \
+    texlive-lang-italian \
+    texlive-lang-polish \
+    texlive-lang-czechslovak \
+    texlive-lang-greek \
+    texlive-lang-cyrillic \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -40,6 +50,7 @@ FROM base AS production
 ENV NODE_ENV=production
 
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/prompts ./prompts
 
 EXPOSE 4000
 CMD ["sh", "-c", "npx prisma db push --skip-generate && node dist/server.js"]

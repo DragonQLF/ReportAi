@@ -1,6 +1,6 @@
 import { generateText } from 'ai';
 import { sectionWriterPrompt, introductionPrompt, conclusionPrompt } from './prompts';
-import { proModel } from './ai';
+import { flashModel, proModel } from './ai';
 import { logger } from '../utils/logger';
 import { PipelineError } from '../utils/errors';
 import { concurrentMap } from '../utils/concurrent';
@@ -97,7 +97,7 @@ export async function writeSections(input: WriterInput): Promise<WriterOutput> {
         },
       ),
       generateText({
-        model: proModel,
+        model: flashModel,
         prompt: introductionPrompt({
           projectName: context.projectName,
           company: context.company,
@@ -123,7 +123,7 @@ export async function writeSections(input: WriterInput): Promise<WriterOutput> {
     }));
 
     const { text: conclusion } = await generateText({
-      model: proModel,
+      model: flashModel,
       prompt: conclusionPrompt({
         projectName: context.projectName,
         sections: sectionNames,

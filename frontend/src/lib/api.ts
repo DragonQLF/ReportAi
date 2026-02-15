@@ -39,7 +39,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   if (!response.ok) {
     const data = await response.json().catch(() => null);
     throw new ApiError(
-      data?.message || `Request failed with status ${response.status}`,
+      data?.error?.message || data?.message || `Request failed with status ${response.status}`,
       response.status,
       data
     );
@@ -232,6 +232,24 @@ export const api = {
 
   deleteVersion: (reportId: string, version: number) =>
     request<void>(`/api/reports/${reportId}/versions/${version}`, { method: "DELETE" }),
+
+  /**
+   * Open an SSE connection for real-time edit stage updates.
+   * Returns a cleanup function that closes the connection.
+   */
+  subscribeToEditProgress: (
+    id: string,
+    onUpdate: (stage: string | null) => void,
+  ): (() => void) => {
+    const es = new EventSource(`${API_URL}/api/reports/${id}/edit-progress`, { withCredentials: true });
+    es.onmessage = (e) => {
+      try {
+        const { stage } = JSON.parse(e.data) as { stage: string | null };
+        onUpdate(stage);
+      } catch { /* ignore parse errors */ }
+    };
+    return () => es.close();
+  },
 
   /**
    * Upload a single image for use in document editing (reuses the existing upload route).

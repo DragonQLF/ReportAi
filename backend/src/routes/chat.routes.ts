@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { streamText, tool, pipeUIMessageStreamToResponse, convertToModelMessages, stepCountIs } from 'ai';
+import { streamText, tool, createUIMessageStream, pipeUIMessageStreamToResponse, convertToModelMessages, stepCountIs } from 'ai';
 import { z } from 'zod';
 import { flashModel } from '../pipeline/ai';
 import { requireAuth } from '../middleware/auth';
@@ -7,55 +7,11 @@ import { prisma } from '../utils/prisma';
 import { logger } from '../utils/logger';
 import { ForbiddenError } from '../utils/errors';
 import { editDocument as applyDocumentEdit } from '../pipeline/editor';
+import { chatSystemPrompt, editModeSystemPrompt } from '../pipeline/prompts';
+import { emitEditProgress } from '../utils/edit-progress';
 
 const router = Router();
 
-/**
- * System prompt for edit mode. The AI decides when to call editDocument vs answer conversationally.
- * We inject whether an image is attached so the AI knows to call the tool.
- */
-function editModeSystem(hasImage: boolean): string {
-  return `You are a document editor assistant. The user has a completed PDF report that was AI-generated.
-
-Rules:
-- For questions, feedback, or general comments about the document or previous edits, respond with 1-2 sentences of text. Do NOT call editDocument.
-- For any requested change to the document (shorten, expand, rewrite, change tone, translate, fix errors, add/remove content, restructure, reformat, etc.), call the editDocument tool immediately with a precise instruction. Do NOT explain what you are about to do before calling the tool.
-- After a successful edit, confirm what changed in one sentence.${hasImage ? '\n- The user attached an image. Call editDocument to incorporate it into the document.' : ''}`;
-}
-
-const SYSTEM_PROMPT = `You are ReportAI, a friendly assistant that helps users create professional PDF reports from their work, studies, or projects.
-
-This tool works for anyone: interns, students, researchers, doctors, artists, engineers, freelancers — any domain.
-
-**Standard fields to collect through natural conversation:**
-- Report title (REQUIRED) — e.g. "Internship Report", "Clinical Rotation Report", "Final Year Project", "Portfolio Showcase"
-- Organization (REQUIRED) — company, university, hospital, clinic, studio, or "Personal Project"
-- Role or program (optional) — e.g. "Backend Engineer", "Medical Student", "Graphic Designer", "MSc Neuroscience"
-- Dates (optional) — e.g. "January 2024 – July 2024", "Semester 2 2024"
-- Description (optional) — what is the project/work about
-- Language (optional, default "en") — one of: en, pt, fr, de, es
-- Writing style (optional, default "professional") — one of: professional, academic, technical
-- Font (optional, default "default") — one of: default, times, charter, palatino, calibri, arial. Only set if the user explicitly asks for a font.
-
-**Custom fields — use addCustomField for domain-specific information:**
-Based on what the user tells you about their domain, proactively add relevant fields:
-- Software projects → add "techStack" (label: "Tech Stack")
-- Medical/clinical → add "specialty" (label: "Specialty"), "supervisor" (label: "Supervisor")
-- Academic research → add "subject" (label: "Subject / Course"), "supervisor" (label: "Supervisor")
-- Art/design → add "medium" (label: "Medium"), "exhibition" (label: "Exhibition")
-- Engineering → add "projectType" (label: "Project Type")
-Only add custom fields that are clearly relevant — don't ask for fields that don't apply.
-
-**Rules:**
-- Be warm, concise. Ask 1-2 things at a time.
-- Extract info naturally — if the user says "I interned at Google as a backend engineer", call setReportField for company="Google" AND role="Backend Engineer" immediately, then add a "techStack" custom field.
-- Call setReportField or addCustomField the moment you extract any value — don't wait.
-- Once you have title + organization + a brief sense of what the project is, call requestScreenshots.
-- Keep messages under 3 sentences.
-- Don't re-ask for info already provided.
-- CRITICAL: You MUST always send a visible text response in every message, even when you call tools. Never send only tool calls with no text.
-- When you generate a title for the user, call setReportField with it immediately, then confirm it in text.
-- LANGUAGE: Detect the language the user writes in and respond in that same language throughout the entire conversation. If the user explicitly asks for a different language, switch to it. On the first message, silently call setReportField for the "language" field using the correct ISO code from this list: en, pt, pt-br, es, fr, de, it, nl, pl, ru, el, cs, sk, hu, ro, tr, sv, no, da, fi. Don't ask the user — just detect and set it. Default to "en" if unsure.`;
 
 router.post('/', requireAuth, async (req, res) => {
   try {
@@ -78,7 +34,8 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     // Inject already-set fields into system prompt so AI doesn't re-ask and uses them as context
-    let systemPrompt = SYSTEM_PROMPT;
+    const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    let systemPrompt = `Today's date is ${today}.\n\n${chatSystemPrompt()}`;
     if (existingReportId) {
       const existing = await prisma.report.findUnique({
         where: { id: existingReportId },
@@ -97,7 +54,7 @@ router.post('/', requireAuth, async (req, res) => {
       }
 
       // Edit mode — report is already generated. The AI decides via tool call whether to edit or answer.
-      if (existing?.status === 'completed' && existing.texUrl) {
+      if (existing?.status === 'completed' && (existing.texUrl || existing.pdfUrl)) {
         const { editImageUrl } = req.body as { editImageUrl?: string };
 
         // Build pipeline chat history for editor context
@@ -114,89 +71,96 @@ router.post('/', requireAuth, async (req, res) => {
           }))
           .filter((m) => m.content);
 
-        const editStream = streamText({
-          model: flashModel,
-          system: editModeSystem(!!editImageUrl),
-          messages: await convertToModelMessages(messages),
-          stopWhen: stepCountIs(3), // respond → (optionally) call tool → follow-up
-          tools: {
-            editDocument: tool({
-              description: 'Edit the LaTeX document. Call this for any requested change to content, structure, tone, length, or formatting.',
-              inputSchema: z.object({
-                instruction: z.string().describe('Clear, specific edit instruction to apply to the document'),
-              }),
-              execute: async ({ instruction }) => {
-                const editResult = await applyDocumentEdit({
-                  reportId: existingReportId,
-                  texUrl: existing.texUrl!,
-                  message: instruction,
-                  imageUrl: editImageUrl,
-                  chatHistory,
-                  reportContext: {
-                    title: existing.title,
-                    company: existing.company,
-                    role: existing.role,
-                    language: existing.language ?? 'en',
-                    style: existing.style ?? 'professional',
+        const modelMessages = await convertToModelMessages(messages);
+
+        const uiStream = createUIMessageStream({
+          execute: async ({ writer }) => {
+            const editStream = streamText({
+              model: flashModel,
+              system: editModeSystemPrompt(!!editImageUrl),
+              messages: modelMessages,
+              stopWhen: stepCountIs(3), // respond → (optionally) call tool → follow-up
+              tools: {
+                editDocument: tool({
+                  description: 'Edit the report. Call this for any requested change to content, structure, tone, length, or formatting.',
+                  inputSchema: z.object({
+                    instruction: z.string().describe('Clear, specific edit instruction to apply to the document'),
+                  }),
+                  execute: async ({ instruction }) => {
+                    const editResult = await applyDocumentEdit({
+                      reportId: existingReportId,
+                      message: instruction,
+                      imageUrl: editImageUrl,
+                      chatHistory,
+                      onProgress: (stage) => emitEditProgress(existingReportId, stage),
+                    });
+                    emitEditProgress(existingReportId, null);
+
+                    // Re-read versions fresh right before writing to minimise the stale-read window
+                    type VersionEntry = { version: number; pdfUrl: string; texUrl?: string; createdAt: string; label?: string };
+                    const fresh = await prisma.report.findUnique({
+                      where: { id: existingReportId },
+                      select: { versions: true, pdfUrl: true },
+                    });
+                    const freshVersions: VersionEntry[] = Array.isArray(fresh?.versions) ? (fresh!.versions as VersionEntry[]) : [];
+                    const nextVersion = freshVersions.length > 0
+                      ? Math.max(...freshVersions.map((v) => v.version)) + 1
+                      : 1;
+                    const editCount = freshVersions.filter((v) => v.label !== 'Original').length;
+                    const snapshot: VersionEntry | null = fresh?.pdfUrl
+                      ? {
+                          version: nextVersion,
+                          pdfUrl: fresh!.pdfUrl,
+                          texUrl: existing.texUrl ?? undefined,
+                          createdAt: new Date().toISOString(),
+                          label: freshVersions.length === 0 ? 'Original' : `Edit ${editCount + 1}`,
+                        }
+                      : null;
+
+                    await prisma.report.update({
+                      where: { id: existingReportId },
+                      data: {
+                        pdfUrl: editResult.pdfUrl ?? fresh?.pdfUrl ?? existing.pdfUrl,
+                        texUrl: editResult.texUrl,
+                        versions: snapshot ? [...freshVersions, snapshot] : freshVersions,
+                      },
+                    });
+
+                    logger.info('Document edit applied via tool', { reportId: existingReportId });
+                    return editResult.summary;
                   },
-                });
-
-                // Re-read versions fresh right before writing to minimise the stale-read window
-                type VersionEntry = { version: number; pdfUrl: string; texUrl?: string; createdAt: string; label?: string };
-                const fresh = await prisma.report.findUnique({
-                  where: { id: existingReportId },
-                  select: { versions: true, pdfUrl: true },
-                });
-                const freshVersions: VersionEntry[] = Array.isArray(fresh?.versions) ? (fresh!.versions as VersionEntry[]) : [];
-                const snapshot: VersionEntry | null = fresh?.pdfUrl
-                  ? {
-                      version: freshVersions.length + 1,
-                      pdfUrl: fresh!.pdfUrl,
-                      texUrl: existing.texUrl ?? undefined,
-                      createdAt: new Date().toISOString(),
-                      label: freshVersions.length === 0 ? 'Original' : `Edit ${freshVersions.length}`,
-                    }
-                  : null;
-
-                await prisma.report.update({
-                  where: { id: existingReportId },
-                  data: {
-                    pdfUrl: editResult.pdfUrl ?? fresh?.pdfUrl ?? existing.pdfUrl,
-                    texUrl: editResult.texUrl,
-                    versions: snapshot ? [...freshVersions, snapshot] : freshVersions,
-                  },
-                });
-
-                logger.info('Document edit applied via tool', { reportId: existingReportId });
-                return editResult.summary;
+                }),
               },
-            }),
-          },
-          onFinish: async ({ text, toolCalls, toolResults }) => {
-            const parts: Record<string, unknown>[] = [];
-            if (text) parts.push({ type: 'text', text });
-            for (const tc of toolCalls ?? []) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const tr = (toolResults as any[])?.find((r) => r.toolCallId === tc.toolCallId);
-              parts.push({
-                type: `tool-${tc.toolName}`,
-                toolName: tc.toolName,
-                toolCallId: tc.toolCallId,
-                input: tc.args,
-                output: tr?.result,
-                state: 'output-available',
-              });
-            }
-            if (parts.length > 0) {
-              const aiMessage = { id: `ai-${Date.now()}`, role: 'assistant', parts };
-              prisma.report
-                .update({ where: { id: existingReportId }, data: { chatMessages: [...messages, aiMessage] } })
-                .catch(() => {});
-            }
+              onFinish: async ({ text, toolCalls, toolResults }) => {
+                const parts: Record<string, unknown>[] = [];
+                if (text) parts.push({ type: 'text', text });
+                for (const tc of toolCalls ?? []) {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const tr = (toolResults as any[])?.find((r) => r.toolCallId === tc.toolCallId);
+                  parts.push({
+                    type: `tool-${tc.toolName}`,
+                    toolName: tc.toolName,
+                    toolCallId: tc.toolCallId,
+                    input: tc.args,
+                    output: tr?.result,
+                    state: 'output-available',
+                  });
+                }
+                if (parts.length > 0) {
+                  const aiMessage = { id: `ai-${Date.now()}`, role: 'assistant', parts };
+                  prisma.report
+                    .update({ where: { id: existingReportId }, data: { chatMessages: [...messages, aiMessage] } })
+                    .catch(() => {});
+                }
+              },
+            });
+
+            // Pipe the streamText chunks through the writer (recommended SDK pattern)
+            writer.merge(editStream.toUIMessageStream());
           },
         });
 
-        pipeUIMessageStreamToResponse({ stream: editStream.toUIMessageStream(), response: res });
+        pipeUIMessageStreamToResponse({ stream: uiStream, response: res });
         return;
       }
 
@@ -222,11 +186,34 @@ router.post('/', requireAuth, async (req, res) => {
       }
     }
 
+    // Accumulate every setReportField / addCustomField value so onFinish can do a
+    // guaranteed batch save. Individual tool executes also attempt immediate saves,
+    // but concurrent updates to the same row can fail silently — the accumulator
+    // catches any that were missed.
+    const pendingFields: Record<string, unknown> = {};
+    const pendingCustom: Record<string, { label: string; value: string }> = {};
+
     const result = streamText({
       model: flashModel,
       system: systemPrompt,
       messages: await convertToModelMessages(messages),
       onFinish: async ({ text, toolCalls, toolResults }) => {
+        // Batch-save all accumulated fields (retry for any individual failures)
+        if (Object.keys(pendingFields).length > 0) {
+          prisma.report.update({ where: { id: reportId }, data: pendingFields }).catch(() => {});
+        }
+        if (Object.keys(pendingCustom).length > 0) {
+          prisma.report
+            .findUnique({ where: { id: reportId }, select: { customFields: true } })
+            .then((r) => {
+              const base = (r?.customFields as Record<string, { label: string; value: string }>) ?? {};
+              return prisma.report.update({
+                where: { id: reportId },
+                data: { customFields: { ...base, ...pendingCustom } },
+              });
+            })
+            .catch(() => {});
+        }
         // Save the complete history including the AI's response.
         // The early save above only has messages up to the user's last turn —
         // this overwrites it with the full conversation once the stream is done.
@@ -259,15 +246,19 @@ router.post('/', requireAuth, async (req, res) => {
             value: z.string(),
           }),
           execute: async ({ field, value }) => {
+            if (field === 'techStack') {
+              pendingFields.techStack = value.split(',').map((s) => s.trim()).filter(Boolean);
+            } else {
+              pendingFields[field] = value;
+            }
             try {
               if (field === 'techStack') {
-                const tech = value.split(',').map((s) => s.trim()).filter(Boolean);
-                await prisma.report.update({ where: { id: reportId }, data: { techStack: tech } });
+                await prisma.report.update({ where: { id: reportId }, data: { techStack: pendingFields.techStack as string[] } });
               } else {
                 await prisma.report.update({ where: { id: reportId }, data: { [field]: value } });
               }
             } catch (err) {
-              logger.warn('Failed to persist report field', { field, reportId, error: err instanceof Error ? err.message : String(err) });
+              logger.warn('Failed to persist report field (will retry in onFinish)', { field, reportId, error: err instanceof Error ? err.message : String(err) });
             }
             return 'saved';
           },
@@ -281,13 +272,14 @@ router.post('/', requireAuth, async (req, res) => {
             value: z.string().describe('The value for this field'),
           }),
           execute: async ({ key, label, value }) => {
+            pendingCustom[key] = { label, value };
             try {
               const report = await prisma.report.findUnique({ where: { id: reportId }, select: { customFields: true } });
               const current = (report?.customFields as Record<string, { label: string; value: string }>) ?? {};
               current[key] = { label, value };
               await prisma.report.update({ where: { id: reportId }, data: { customFields: current } });
             } catch (err) {
-              logger.warn('Failed to persist custom field', { key, reportId, error: err instanceof Error ? err.message : String(err) });
+              logger.warn('Failed to persist custom field (will retry in onFinish)', { key, reportId, error: err instanceof Error ? err.message : String(err) });
             }
             return 'saved';
           },

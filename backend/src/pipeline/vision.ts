@@ -17,6 +17,7 @@ interface VisionInput {
     projectName: string;
     description: string;
     techStack: string[];
+    language: string;
     customFields?: Record<string, { label: string; value: string }>;
   };
 }

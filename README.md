@@ -24,7 +24,7 @@ Upload screenshots or a screen recording of your project. AI analyzes what you b
 - Screen recording → intelligent frame extraction (only captures meaningful changes)
 - Reviewer agent — automatically filters blurry, duplicate, and irrelevant frames
 - AI understands your app semantically, not just visually
-- Multiple output styles: Academic, Professional, Technical
+- Multiple output styles: Academic, Professional, Technical, Casual
 - LaTeX output — looks proper, compiles in Overleaf
 - University template support (IST, FEUP, ENSIIE, INSA, and more)
 - Multilingual — English, Portuguese, French, German, Spanish, and more
@@ -82,7 +82,7 @@ See [`backend/.env.example`](./backend/.env.example) and [`frontend/.env.example
 | Frontend | Next.js 16 (App Router), Tailwind CSS, shadcn/ui |
 | Backend | Express 5, TypeScript |
 | Vision AI | Gemini 2.5 Flash |
-| Writing AI | Gemini 2.5 Pro |
+| Writing AI | Gemini 2.5 Pro (sections) + Flash (cluster, intro, conclusion, edits) |
 | AI SDK | Vercel AI SDK 6 |
 | Storage | Cloudflare R2 |
 | Database | Neon (Postgres) via Prisma |
@@ -111,10 +111,10 @@ PRs welcome. The core pipeline is where the interesting work is — better promp
 backend/src/pipeline/
   reviewer.ts   # Blur detection, dedup, threshold retry loop
   vision.ts     # Gemini Flash — describe each screenshot
-  cluster.ts    # Group screenshots into report sections
-  writer.ts     # Gemini Pro — write narrative prose per section
-  latex.ts      # Fill LaTeX template + compile to PDF
-  editor.ts     # AI-powered post-generation editing
+  cluster.ts    # Group screenshots into report sections (Flash)
+  writer.ts     # Write narrative prose per section (Pro for bodies, Flash for intro/conclusion)
+  latex.ts      # Build LaTeX document + compile to PDF
+  editor.ts     # Section-level AI editing with real-time SSE progress
 ```
 
 Open an issue before starting large changes.
