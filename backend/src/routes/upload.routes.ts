@@ -8,7 +8,9 @@ import path from 'path';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { NotFoundError, ForbiddenError, ValidationError } from '../utils/errors';
-import { uploadScreenshot, deleteStorageFile } from '../storage/screenshot-storage.service';
+import { uploadScreenshot, deleteStorageFile, uploadDocumentFile } from '../storage/screenshot-storage.service';
+import { flashModel } from '../pipeline/ai';
+import { generateText } from 'ai';
 import { logger } from '../utils/logger';
 
 const execFileAsync = promisify(execFile);
@@ -123,7 +125,7 @@ router.post(
         throw new ForbiddenError('You do not own this report');
       }
 
-      if (report.status !== 'pending' && report.status !== 'failed') {
+      if (report.status !== 'pending' && report.status !== 'failed' && report.status !== 'completed') {
         throw new ValidationError('Cannot upload screenshots to a report that is being processed');
       }
 
@@ -232,6 +234,235 @@ router.delete(
         success: true,
         message: 'Screenshot deleted',
       });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// Multer for document uploads — PDF and plain text only, 20 MB max
+const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['application/pdf', 'text/plain', 'text/markdown', 'text/x-markdown'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new ValidationError(`Invalid file type: ${file.mimetype}. Allowed: PDF, plain text`));
+    }
+  },
+});
+
+/**
+ * Extract text from a document buffer.
+ * - Text files: decoded as UTF-8 directly.
+ * - PDFs: sent to Gemini Flash as a file part for native extraction.
+ */
+async function extractDocumentText(buffer: Buffer, mimetype: string, filename: string): Promise<string> {
+  if (mimetype === 'application/pdf') {
+    logger.info('Extracting text from PDF via Gemini Flash', { filename });
+    const { text } = await generateText({
+      model: flashModel,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'file', data: buffer, mediaType: 'application/pdf' },
+            { type: 'text', text: 'Extract all text content from this document verbatim. Preserve structure: headings, lists, numbering. Return plain text only.' },
+          ],
+        },
+      ],
+    });
+    return text;
+  }
+  // Plain text / markdown
+  return buffer.toString('utf-8');
+}
+
+/** POST /api/upload/:reportId/document — Upload a reference document (PDF or text) */
+router.post(
+  '/:reportId/document',
+  requireAuth,
+  documentUpload.single('document'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const reportId = param(req, 'reportId');
+
+      const report = await prisma.report.findUnique({
+        where: { id: reportId },
+        select: { userId: true, status: true, contextDocuments: true },
+      });
+
+      if (!report) throw new NotFoundError('Report');
+      if (report.userId !== req.user!.id) throw new ForbiddenError('You do not own this report');
+      if (report.status !== 'pending' && report.status !== 'failed') {
+        throw new ValidationError('Cannot upload documents to a report that is being processed or completed');
+      }
+
+      const file = req.file;
+      if (!file) throw new ValidationError('No file uploaded');
+
+      const text = await extractDocumentText(file.buffer, file.mimetype, file.originalname);
+
+      const url = await uploadDocumentFile(file.buffer, {
+        reportId,
+        filename: `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
+        contentType: file.mimetype,
+      });
+
+      type ContextDoc = { name: string; url: string; text: string };
+      const existing: ContextDoc[] = Array.isArray(report.contextDocuments)
+        ? (report.contextDocuments as ContextDoc[])
+        : [];
+
+      const newDoc: ContextDoc = { name: file.originalname, url, text };
+      const updated = await prisma.report.update({
+        where: { id: reportId },
+        data: { contextDocuments: [...existing, newDoc] },
+      });
+
+      logger.info('Document uploaded', { reportId, name: file.originalname, chars: text.length });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          document: newDoc,
+          contextDocuments: updated.contextDocuments,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// Multer for logo uploads — PNG/JPEG/WebP only, 5 MB max
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/webp'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new ValidationError(`Invalid file type: ${file.mimetype}. Allowed: PNG, JPEG, WebP`));
+    }
+  },
+});
+
+/** POST /api/upload/:reportId/logo — Upload a logo image for the report */
+router.post(
+  '/:reportId/logo',
+  requireAuth,
+  logoUpload.single('logo'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const reportId = param(req, 'reportId');
+
+      const report = await prisma.report.findUnique({
+        where: { id: reportId },
+        select: { userId: true, layoutConfig: true },
+      });
+
+      if (!report) throw new NotFoundError('Report');
+      if (report.userId !== req.user!.id) throw new ForbiddenError('You do not own this report');
+
+      const file = req.file;
+      if (!file) throw new ValidationError('No file uploaded');
+
+      const ext = file.mimetype === 'image/png' ? 'png' : file.mimetype === 'image/webp' ? 'webp' : 'jpg';
+      const logoUrl = await uploadDocumentFile(file.buffer, {
+        reportId,
+        filename: `logo.${ext}`,
+        contentType: file.mimetype,
+      });
+
+      // Delete previous logo from storage if present
+      const existing = report.layoutConfig as Record<string, unknown> | null;
+      if (existing?.logoUrl && typeof existing.logoUrl === 'string') {
+        await deleteStorageFile(existing.logoUrl).catch(() => {});
+      }
+
+      const updatedConfig = { ...(existing ?? {}), logoUrl };
+      await prisma.report.update({
+        where: { id: reportId },
+        data: { layoutConfig: updatedConfig },
+      });
+
+      logger.info('Logo uploaded', { reportId, logoUrl });
+      res.status(201).json({ logoUrl });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/** DELETE /api/upload/:reportId/logo — Remove logo from the report */
+router.delete(
+  '/:reportId/logo',
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const reportId = param(req, 'reportId');
+
+      const report = await prisma.report.findUnique({
+        where: { id: reportId },
+        select: { userId: true, layoutConfig: true },
+      });
+
+      if (!report) throw new NotFoundError('Report');
+      if (report.userId !== req.user!.id) throw new ForbiddenError('You do not own this report');
+
+      const existing = report.layoutConfig as Record<string, unknown> | null;
+      if (existing?.logoUrl && typeof existing.logoUrl === 'string') {
+        await deleteStorageFile(existing.logoUrl).catch(() => {});
+      }
+
+      const updatedConfig = { ...(existing ?? {}), logoUrl: undefined };
+      delete (updatedConfig as Record<string, unknown>).logoUrl;
+      await prisma.report.update({
+        where: { id: reportId },
+        data: { layoutConfig: updatedConfig },
+      });
+
+      logger.info('Logo removed', { reportId });
+      res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/** DELETE /api/upload/:reportId/document/:docIndex — Remove a reference document */
+router.delete(
+  '/:reportId/document/:docIndex',
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const reportId = param(req, 'reportId');
+      const docIndex = parseInt(param(req, 'docIndex'), 10);
+
+      const report = await prisma.report.findUnique({
+        where: { id: reportId },
+        select: { userId: true, contextDocuments: true },
+      });
+
+      if (!report) throw new NotFoundError('Report');
+      if (report.userId !== req.user!.id) throw new ForbiddenError('You do not own this report');
+
+      type ContextDoc = { name: string; url: string; text: string };
+      const docs: ContextDoc[] = Array.isArray(report.contextDocuments)
+        ? (report.contextDocuments as ContextDoc[])
+        : [];
+
+      if (docIndex < 0 || docIndex >= docs.length) throw new NotFoundError('Document');
+
+      const [removed] = docs.splice(docIndex, 1);
+      await deleteStorageFile(removed.url).catch(() => {});
+      await prisma.report.update({ where: { id: reportId }, data: { contextDocuments: docs } });
+
+      res.json({ success: true });
     } catch (error) {
       next(error);
     }

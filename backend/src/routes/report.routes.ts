@@ -8,8 +8,8 @@ import { logger } from '../utils/logger';
 import { reportQueue } from '../queue/report.queue';
 import { createSubscriber } from '../queue/connection';
 import { deleteStorageFile } from '../storage/screenshot-storage.service';
-import { editDocument as applyDocumentEdit } from '../pipeline/editor';
 import { onEditProgress } from '../utils/edit-progress';
+import { compileCurrentReport } from '../pipeline/editor';
 
 const router = Router();
 
@@ -33,10 +33,26 @@ const createReportSchema = z.object({
   language: z.enum(['en','pt','pt-br','es','fr','de','it','nl','pl','ru','el','cs','sk','hu','ro','tr','sv','no','da','fi']).default('en'),
   style: z.enum(['academic', 'professional', 'technical', 'casual']).default('academic'),
   font: z.enum(['default', 'garamond', 'times', 'palatino', 'helvetica', 'charter', 'calibri', 'arial']).default('default'),
-  customFields: z.record(customFieldValueSchema).default({}),
+  customFields: z.record(z.string(), customFieldValueSchema).default({}),
 });
 
-const updateReportSchema = createReportSchema.partial();
+const sectionContentSchema = z.object({
+  introduction: z.string(),
+  introductionTitle: z.string().optional(),
+  sections: z.array(z.object({
+    sectionName: z.string(),
+    content: z.string(),
+    screenshotIndices: z.array(z.number()),
+  })),
+  conclusion: z.string(),
+  conclusionTitle: z.string().optional(),
+}).optional();
+
+const updateReportSchema = createReportSchema.partial().extend({
+  sectionContent: sectionContentSchema,
+  status: z.enum(['pending', 'queued', 'reviewing', 'processing', 'writing', 'compiling', 'completed', 'failed']).optional(),
+  layoutConfig: z.record(z.string(), z.unknown()).optional(),
+});
 
 // --- Routes ---
 
@@ -159,7 +175,7 @@ router.patch(
         throw new ForbiddenError('You do not own this report');
       }
 
-      if (existing.status !== 'pending' && existing.status !== 'failed') {
+      if (existing.status !== 'pending' && existing.status !== 'failed' && existing.status !== 'completed') {
         throw new ValidationError('Cannot update a report that is already processing');
       }
 
@@ -490,88 +506,43 @@ router.get(
   },
 );
 
-// --- Edit schema ---
-
-const editReportSchema = z.object({
-  message: z.string().min(1).max(2000),
-  imageUrl: z.string().url().optional(),
-});
-
-/** POST /api/reports/:id/edit — AI-powered document editing (no queue, direct) */
+/** POST /api/reports/:id/compile — Recompile PDF from current sectionContent, saves version snapshot */
 router.post(
-  '/:id/edit',
+  '/:id/compile',
   requireAuth,
-  validate(editReportSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const id = param(req, 'id');
-      const { message, imageUrl } = req.body as { message: string; imageUrl?: string };
-
       const report = await prisma.report.findUnique({
         where: { id },
-        select: {
-          userId: true,
-          status: true,
-          texUrl: true,
-          pdfUrl: true,
-          chatMessages: true,
-          title: true,
-          company: true,
-          role: true,
-          language: true,
-          style: true,
-        },
+        select: { userId: true, status: true, sectionContent: true, pdfUrl: true, texUrl: true, versions: true },
       });
-
       if (!report) throw new NotFoundError('Report');
       if (report.userId !== req.user!.id) throw new ForbiddenError('You do not own this report');
-      if (report.status !== 'completed') throw new ValidationError('Report must be completed before editing');
-      if (!report.texUrl) throw new ValidationError('No LaTeX source found for this report');
+      if (report.status !== 'completed') throw new ValidationError('Only completed reports can be recompiled');
+      if (!report.sectionContent) throw new ValidationError('Report has no section content to compile');
 
-      const chatHistory = (report.chatMessages as { role: string; content: string }[] | null) ?? [];
+      type VersionEntry = { version: number; pdfUrl: string; texUrl?: string; createdAt: string; label?: string };
+      const existingVersions: VersionEntry[] = Array.isArray(report.versions) ? (report.versions as VersionEntry[]) : [];
+      const nextVersion = existingVersions.length > 0 ? Math.max(...existingVersions.map((v) => v.version)) + 1 : 1;
+      const editCount = existingVersions.filter((v) => /^Edit \d+$/.test(v.label ?? '')).length;
+      const label = existingVersions.length === 0 ? 'Original' : `Edit ${editCount + 1}`;
+      const snapshot: VersionEntry | null = report.pdfUrl
+        ? { version: nextVersion, pdfUrl: report.pdfUrl, texUrl: report.texUrl ?? undefined, createdAt: new Date().toISOString(), label }
+        : null;
 
-      const result = await applyDocumentEdit({
-        reportId: id,
-        texUrl: report.texUrl,
-        message,
-        imageUrl,
-        chatHistory,
-        reportContext: {
-          title: report.title,
-          company: report.company,
-          role: report.role,
-          language: report.language,
-          style: report.style,
-        },
-      });
-
-      // Append the exchange to chatMessages for context in future edits
-      const updatedHistory = [
-        ...chatHistory,
-        { role: 'user', content: message, timestamp: new Date().toISOString() },
-        { role: 'assistant', content: result.summary, timestamp: new Date().toISOString() },
-      ];
+      const result = await compileCurrentReport(id, 'Prose edit');
 
       await prisma.report.update({
         where: { id },
         data: {
-          pdfUrl: result.pdfUrl ?? report.pdfUrl,
+          pdfUrl: result.pdfUrl ?? report.pdfUrl ?? undefined,
           texUrl: result.texUrl,
-          chatMessages: updatedHistory,
+          versions: snapshot ? [...existingVersions, snapshot] : existingVersions,
         },
       });
 
-      logger.info('Document edit applied', { reportId: id, userId: req.user!.id });
-
-      res.json({
-        success: true,
-        data: {
-          pdfUrl: result.pdfUrl ?? report.pdfUrl,
-          texUrl: result.texUrl,
-          message: result.summary,
-          chatMessages: updatedHistory,
-        },
-      });
+      res.json({ success: true, data: { pdfUrl: result.pdfUrl, texUrl: result.texUrl } });
     } catch (error) {
       next(error);
     }

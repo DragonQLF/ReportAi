@@ -29,6 +29,10 @@ Upload screenshots or a screen recording of your project. AI analyzes what you b
 - University template support (IST, FEUP, ENSIIE, INSA, and more)
 - Multilingual — English, Portuguese, French, German, Spanish, and more
 - Download raw `.tex` to edit in Overleaf
+- **Chat editing** — after generation, ask AI to rewrite sections, change tone, translate, add or remove screenshots; all edits compile to a new PDF in one pass
+- **Reference documents** — upload a PDF or text file (project spec, brief, requirements) so the AI can draw on it when writing each section
+- **Logo & cover customization** — upload a logo to place on the cover page or page header; customize title/field font sizes, custom fields (student name, supervisor, etc.), and header/footer text
+- **Inline section editor** — directly edit prose in-browser with a rich text editor (TipTap); figure references rendered as interactive chips; one-click compile to PDF
 
 ---
 
@@ -110,11 +114,12 @@ PRs welcome. The core pipeline is where the interesting work is — better promp
 ```
 backend/src/pipeline/
   reviewer.ts   # Blur detection, dedup, threshold retry loop
-  vision.ts     # Gemini Flash — describe each screenshot
-  cluster.ts    # Group screenshots into report sections (Flash)
+  vision.ts     # Gemini Flash — describe each screenshot + classify image type
+  cluster.ts    # Group screenshots into sections (Flash) — assigns side-by-side pairs
+  docmapper.ts  # Map reference document excerpts to sections (Flash)
   writer.ts     # Write narrative prose per section (Pro for bodies, Flash for intro/conclusion)
-  latex.ts      # Build LaTeX document + compile to PDF
-  editor.ts     # Section-level AI editing with real-time SSE progress
+  latex.ts      # Build LaTeX document + compile to PDF (logo, header/footer, cover config, side-by-side figures)
+  editor.ts     # Post-generation editing — editDocument, addScreenshot, removeScreenshot, setLogo, compileCurrentReport
 ```
 
 Open an issue before starting large changes.

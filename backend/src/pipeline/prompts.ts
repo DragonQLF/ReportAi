@@ -11,6 +11,13 @@ import path from 'path';
 
 type CustomFields = Record<string, { label: string; value: string }>;
 
+interface LayoutConfig {
+  header?: { left?: string; center?: string; right?: string };
+  footer?: { left?: string; center?: string; right?: string };
+  logoUrl?: string;
+  logoPosition?: 'header-left' | 'header-right' | 'cover' | 'none';
+}
+
 function formatCustomFields(customFields?: CustomFields): string {
   if (!customFields || Object.keys(customFields).length === 0) return '';
   const lines = Object.values(customFields).map((f) => `${f.label}: ${f.value}`);
@@ -70,6 +77,7 @@ const templates = {
   chatSystem: load('chat-system'),
   editModeSystem: load('edit-mode-system'),
   latexFix: load('latex-fix'),
+  documentMapper: load('document-mapper'),
 };
 
 function fill(template: string, vars: Record<string, string>): string {
@@ -139,10 +147,15 @@ export function sectionWriterPrompt(context: {
   style: string;
   language: string;
   customFields?: CustomFields;
+  documentContext?: string;
 }): string {
   const screenshotsList = context.screenshots
     .map((s) => `Figure \\ref{fig:screenshot_${s.index}} — ${s.feature}\n   Description: ${s.description}`)
     .join('\n\n');
+
+  const documentContext = context.documentContext?.trim()
+    ? `\nRelevant context from uploaded documents:\n---\n${context.documentContext.trim()}\n---\n`
+    : '';
 
   return fill(templates.sectionWriter, {
     style: context.style,
@@ -155,6 +168,25 @@ export function sectionWriterPrompt(context: {
     sectionName: context.sectionName,
     sectionDescription: context.sectionDescription,
     screenshotsList,
+    documentContext,
+  });
+}
+
+// --- Document mapping prompts (Gemini Flash) ---
+
+export function documentMappingPrompt(context: {
+  sections: { name: string; description: string }[];
+  documentText: string;
+  language: string;
+}): string {
+  const sectionsList = context.sections
+    .map((s) => `- "${s.name}": ${s.description}`)
+    .join('\n');
+
+  return fill(templates.documentMapper, {
+    sectionsList,
+    documentText: context.documentText,
+    language: languageName(context.language),
   });
 }
 
@@ -200,16 +232,31 @@ export function editSectionsPrompt(context: {
   instruction: string;
   sectionContent: {
     introduction: string;
-    sections: { sectionName: string; content: string }[];
+    sections: { sectionName: string; content: string; screenshotIndices?: number[] }[];
     conclusion: string;
   };
+  screenshots?: { index: number; feature: string }[];
   chatHistory: { role: string; content: string }[];
   imageDescription?: string;
   imageFilename?: string;
+  layoutConfig?: LayoutConfig;
 }): string {
+  const figureLabel = (idx: number): string => {
+    const shot = context.screenshots?.find((s) => s.index === idx);
+    return shot ? `\\ref{fig:screenshot_${idx}} (${shot.feature})` : `\\ref{fig:screenshot_${idx}}`;
+  };
+
+  const sectionHeader = (name: string, indices?: number[]): string => {
+    if (!indices?.length || !context.screenshots?.length) return `[${name}]`;
+    const refs = indices.map(figureLabel).join(', ');
+    return `[${name}] — figures: ${refs}`;
+  };
+
   const parts: string[] = [
     `[introduction]\n${context.sectionContent.introduction}`,
-    ...context.sectionContent.sections.map((s) => `[${s.sectionName}]\n${s.content}`),
+    ...context.sectionContent.sections.map((s) =>
+      `${sectionHeader(s.sectionName, s.screenshotIndices)}\n${s.content}`
+    ),
     `[conclusion]\n${context.sectionContent.conclusion}`,
   ];
 
@@ -221,6 +268,9 @@ export function editSectionsPrompt(context: {
     ? `\nThe user has attached an image. Description: ${context.imageDescription}\nFilename for reference: ${context.imageFilename}`
     : '';
 
+  const lc = context.layoutConfig;
+  const layoutConfigSection = lc ? `\nCurrent layout:\n- Header: left="${lc.header?.left ?? '(company)'}", center="${lc.header?.center ?? ''}", right="${lc.header?.right ?? '(title)'}"\n- Footer: left="${lc.footer?.left ?? ''}", center="${lc.footer?.center ?? 'page number'}", right="${lc.footer?.right ?? ''}"\n- Logo position: ${lc.logoPosition ?? 'none'}${lc.logoUrl ? ' (logo uploaded)' : ''}\n` : '';
+
   return fill(templates.editSections, {
     title: context.title || 'Unknown',
     company: context.company || 'Unknown',
@@ -231,6 +281,7 @@ export function editSectionsPrompt(context: {
     sectionsList: parts.join('\n\n---\n\n'),
     instruction: context.instruction,
     imageSection,
+    layoutConfig: layoutConfigSection,
   });
 }
 
@@ -264,7 +315,9 @@ export function chatSystemPrompt(): string {
 
 export function editModeSystemPrompt(hasImage: boolean): string {
   return fill(templates.editModeSystem, {
-    imageInstruction: hasImage ? '\n- An image is attached. Call editDocument to incorporate it.' : '',
+    imageInstruction: hasImage
+      ? '\n- An image is attached. First determine its type: if it looks like a logo, emblem, seal, badge, crest, or icon (i.e. NOT a UI screenshot), call setLogo immediately — default position to "cover" unless the user says otherwise. If it is a UI screenshot intended to appear as a figure in the report, call addScreenshot. If it is only being used as context for a text edit, call editDocument.'
+      : '',
   });
 }
 

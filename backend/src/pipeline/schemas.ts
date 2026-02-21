@@ -25,6 +25,8 @@ export type ReviewOutput = z.infer<typeof reviewOutputSchema>;
 
 export const screenshotAnalysisItemSchema = z.object({
   index: z.number(),
+  imageType: z.enum(['screenshot', 'logo', 'photo', 'diagram', 'other'])
+    .describe('Type of image: "screenshot" for UI/app screenshots; "logo" for logos, emblems, seals, badges, crests, or institutional insignia; "photo" for real-world photographs; "diagram" for technical diagrams, charts, or wireframes; "other" for anything else'),
   feature: z.string().describe('The main feature or UI element visible in the screenshot'),
   description: z.string().describe('A detailed description of what the screenshot shows'),
   uiElements: z.array(z.string()).describe('Key UI elements identified'),
@@ -45,6 +47,7 @@ export const sectionSchema = z.object({
   description: z.string().describe('Brief description of what this section covers'),
   screenshotIndices: z.array(z.number()).describe('Indices of screenshots belonging to this section'),
   order: z.number().describe('Order of this section in the report'),
+  screenshotPairs: z.array(z.array(z.number())).optional().default([]).describe('Pairs of screenshot indices to render side-by-side in minipage columns'),
 });
 
 export const clusterOutputSchema = z.object({
@@ -97,7 +100,7 @@ export const pipelineContextSchema = z.object({
   language: z.string(),
   style: z.string(),
   font: z.string().default('default'),
-  customFields: z.record(z.object({ label: z.string(), value: z.string() })).optional(),
+  customFields: z.record(z.string(), z.object({ label: z.string(), value: z.string() })).optional(),
 });
 
 export type PipelineContext = z.infer<typeof pipelineContextSchema>;

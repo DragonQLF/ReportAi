@@ -17,4 +17,6 @@ Tasks:
 
 Each section should have a clear theme and contain related images. Sections should tell a coherent story about the work or project.
 
-CRITICAL: The report template always generates a separate Introduction and Conclusion automatically. Never name any section "Introduction", "Conclusion", or any variation of those words (e.g. "Introduction: ...", "Overview and Introduction", "Final Conclusions"). Name sections after the specific feature, system, or topic they cover instead — e.g. "Public-Facing Website", "User Dashboard", "Authentication System".
+CRITICAL: The report template always generates a separate Introduction and Conclusion automatically. Never name any section "Introduction", "Conclusion", or any variation of those words (e.g. "Introduction: ...", "Overview and Introduction", "Final Conclusions"). Name sections after the specific feature, activity, or topic they cover instead — e.g. "Patient Intake Workflow", "Data Analysis Pipeline", "Exhibition Installation", "Backend Architecture".
+
+SCREENSHOT PAIRING: If two screenshots within the same section show the same feature in different states (before/after), complementary views at similar scale, or paired steps in a workflow — set them as a pair in `screenshotPairs` so they render side-by-side. Only pair screenshots that are genuinely complementary. Do not force unrelated screenshots into pairs.

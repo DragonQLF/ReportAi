@@ -6,6 +6,7 @@ import { downloadFromR2 } from '../storage/screenshot-storage.service';
 import { reviewScreenshots } from './reviewer';
 import { analyzeScreenshots } from './vision';
 import { clusterScreenshots } from './cluster';
+import { mapDocumentToSections } from './docmapper';
 import { writeSections } from './writer';
 import { generateLatex } from './latex';
 import type { PipelineContext } from './schemas';
@@ -41,6 +42,11 @@ export async function runPipeline(reportId: string): Promise<void> {
     if (!report) {
       throw new PipelineError('init', 'Report not found');
     }
+
+    type ContextDoc = { name: string; url: string; text: string };
+    const contextDocuments: ContextDoc[] = Array.isArray(report.contextDocuments)
+      ? (report.contextDocuments as ContextDoc[])
+      : [];
 
     const context: PipelineContext = {
       reportId: report.id,
@@ -164,6 +170,20 @@ export async function runPipeline(reportId: string): Promise<void> {
       ),
     );
 
+    // ===== Optional: Document mapping pass =====
+    // If the user uploaded reference documents (PDFs, text files), map each
+    // document's relevant content to each section so the writer gets focused
+    // context rather than the full document dumped into every section prompt.
+    let documentContext: Record<string, string> | undefined;
+    if (contextDocuments.length > 0) {
+      const combinedText = contextDocuments.map((d) => `[${d.name}]\n${d.text}`).join('\n\n---\n\n');
+      documentContext = await mapDocumentToSections({
+        sections: clusterOutput.sections.map((s) => ({ name: s.name, description: s.description })),
+        documentText: combinedText,
+        language: context.language,
+      });
+    }
+
     const writerOutput = await writeSections({
       sections: clusterOutput.sections,
       screenshots: visionOutput.screenshots,
@@ -177,6 +197,7 @@ export async function runPipeline(reportId: string): Promise<void> {
         style: context.style,
         language: context.language,
         customFields: context.customFields,
+        documentContext,
       },
     });
 
@@ -222,6 +243,7 @@ export async function runPipeline(reportId: string): Promise<void> {
           sectionName: sc.sectionName,
           content: sc.content,
           screenshotIndices: cluster?.screenshotIndices ?? [],
+          screenshotPairs: cluster?.screenshotPairs ?? [],
         };
       }),
       conclusion: writerOutput.conclusion,

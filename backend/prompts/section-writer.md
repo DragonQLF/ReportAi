@@ -11,7 +11,7 @@ Section Purpose: {{sectionDescription}}
 
 Images in this section:
 {{screenshotsList}}
-
+{{documentContext}}
 Write a detailed, well-structured section (300-600 words) that:
 1. Explains what is shown in the images
 2. Discusses relevant decisions, methodology, or implementation approach

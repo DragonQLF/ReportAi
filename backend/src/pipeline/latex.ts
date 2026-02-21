@@ -12,6 +12,20 @@ import { proModel } from './ai';
 import { latexFixPrompt } from './prompts';
 import type { WriterOutput, Section, LatexOutput } from './schemas';
 
+export interface LayoutConfig {
+  header?: { left?: string; center?: string; right?: string };
+  footer?: { left?: string; center?: string; right?: string };
+  logoUrl?: string;
+  logoPosition?: 'header-left' | 'header-right' | 'cover' | 'none';
+  coverConfig?: {
+    titleSize?: string;      // huge | LARGE | Large | large | normalsize
+    companySize?: string;    // Large | large | normalsize | small
+    roleSize?: string;       // Large | large | normalsize | small
+    datesSize?: string;      // large | normalsize | small
+    customFieldSize?: string; // normalsize | small | footnotesize
+  };
+}
+
 interface LatexInput {
   writerOutput: WriterOutput;
   sections: Section[];
@@ -61,6 +75,7 @@ export async function generateLatex(input: LatexInput): Promise<LatexOutput> {
           name: sc.sectionName,
           content: sc.content,
           screenshotIndices: clusterSection?.screenshotIndices ?? [],
+          screenshotPairs: clusterSection?.screenshotPairs ?? [],
         };
       }),
       conclusion: writerOutput.conclusion,
@@ -108,6 +123,7 @@ export async function compileLatexDocument(
   images: { filename: string; buffer: Buffer }[],
   reportId: string,
   filePrefix = 'report',
+  logoBuffer?: Buffer,
 ): Promise<{ pdfUrl?: string; texUrl: string }> {
   const texUrl = await uploadOutput(Buffer.from(texContent, 'utf-8'), {
     reportId,
@@ -115,11 +131,16 @@ export async function compileLatexDocument(
     contentType: 'application/x-tex',
   });
 
+  // Append logo as a named image so pdflatex can find it in the temp dir
+  const allImages = logoBuffer
+    ? [...images, { filename: 'logo', buffer: logoBuffer }]
+    : images;
+
   let pdfUrl: string | undefined;
   let finalTexContent = texContent;
   let finalTexUrl = texUrl;
 
-  const first = await compilePdf(finalTexContent, images, reportId);
+  const first = await compilePdf(finalTexContent, allImages, reportId);
 
   if (first.buffer) {
     pdfUrl = await uploadOutput(first.buffer, {
@@ -136,7 +157,7 @@ export async function compileLatexDocument(
       filename: `${filePrefix}.tex`,
       contentType: 'application/x-tex',
     });
-    const second = await compilePdf(fixedTex, images, reportId);
+    const second = await compilePdf(fixedTex, allImages, reportId);
     if (second.buffer) {
       pdfUrl = await uploadOutput(second.buffer, {
         reportId,
@@ -240,14 +261,17 @@ export function buildLatexDocument(params: {
   role: string;
   dates: string;
   introduction: string;
-  sections: { name: string; content: string; screenshotIndices: number[] }[];
+  introductionTitle?: string;
+  sections: { name: string; content: string; screenshotIndices: number[]; screenshotPairs?: number[][] }[];
   conclusion: string;
+  conclusionTitle?: string;
   screenshots: { index: number; url: string; feature: string; description: string }[];
   language: string;
   font: string;
   customFields?: Record<string, { label: string; value: string }>;
+  layoutConfig?: LayoutConfig;
 }): string {
-  const { title, company, role, dates, introduction, sections, conclusion, screenshots, language, font, customFields } = params;
+  const { title, company, role, dates, introduction, introductionTitle, sections, conclusion, conclusionTitle, screenshots, language, font, customFields, layoutConfig } = params;
 
   const fontPackage =
     font === 'times'      ? '\\usepackage{times}\n' :
@@ -305,28 +329,62 @@ export function buildLatexDocument(params: {
     fi:    { introduction: 'Johdanto',      conclusion: 'Yhteenveto' },
   };
   const sectionLabels = SECTION_LABELS[language?.toLowerCase()?.trim()] ?? SECTION_LABELS.en;
+  const introLabel = introductionTitle ?? sectionLabels.introduction;
+  const conclusionLabel = conclusionTitle ?? sectionLabels.conclusion;
 
-  // Build figure commands for each screenshot
+  // Build figure commands for a single screenshot
   const figureForIndex = (idx: number): string => {
     const screenshot = screenshots.find((s) => s.index === idx);
     if (!screenshot) return '';
-
-    const caption = screenshot.feature;
-
     return `
 \\begin{figure}[H]
   \\centering
   \\includegraphics[width=0.95\\textwidth]{screenshot_${idx}}
-  \\caption{${escapeLatex(caption)}}
+  \\caption{${escapeLatex(screenshot.feature)}}
   \\label{fig:screenshot_${idx}}
+\\end{figure}`;
+  };
+
+  // Build side-by-side minipage figure for a pair of screenshots
+  const figurePairForIndices = (idx1: number, idx2: number): string => {
+    const s1 = screenshots.find((s) => s.index === idx1);
+    const s2 = screenshots.find((s) => s.index === idx2);
+    if (!s1 && !s2) return '';
+    if (!s1) return figureForIndex(idx2);
+    if (!s2) return figureForIndex(idx1);
+    return `
+\\begin{figure}[H]
+  \\centering
+  \\begin{minipage}{0.48\\textwidth}
+    \\centering
+    \\includegraphics[width=\\linewidth]{screenshot_${idx1}}
+    \\caption{${escapeLatex(s1.feature)}}
+    \\label{fig:screenshot_${idx1}}
+  \\end{minipage}
+  \\hfill
+  \\begin{minipage}{0.48\\textwidth}
+    \\centering
+    \\includegraphics[width=\\linewidth]{screenshot_${idx2}}
+    \\caption{${escapeLatex(s2.feature)}}
+    \\label{fig:screenshot_${idx2}}
+  \\end{minipage}
 \\end{figure}`;
   };
 
   // Build section content with embedded figures
   const sectionContent = sections
     .map((section) => {
+      const pairs = section.screenshotPairs ?? [];
+      // Second elements of pairs are rendered together with the first — skip them individually
+      const pairedSeconds = new Set(pairs.map(([, b]) => b));
+      const pairMap = new Map(pairs.map(([a, b]) => [a, b]));
+
       const figures = section.screenshotIndices
-        .map((idx) => figureForIndex(idx))
+        .filter((idx) => !pairedSeconds.has(idx))
+        .map((idx) => {
+          const partner = pairMap.get(idx);
+          return partner !== undefined ? figurePairForIndices(idx, partner) : figureForIndex(idx);
+        })
         .filter(Boolean)
         .join('\n');
 
@@ -338,6 +396,27 @@ ${section.content}
 ${figures}`;
     })
     .join('\n');
+
+  // Header / footer values — use layoutConfig overrides when present, else sensible defaults
+  const hLeft   = layoutConfig?.header?.left   ?? escapeLatex(company);
+  const hCenter = layoutConfig?.header?.center ?? '';
+  const hRight  = layoutConfig?.header?.right  ?? escapeLatex(title);
+  const fLeft   = layoutConfig?.footer?.left   ?? '';
+  const fCenter = layoutConfig?.footer?.center ?? '\\thepage';
+  const fRight  = layoutConfig?.footer?.right  ?? '';
+
+  const logoPos = layoutConfig?.logoPosition;
+  const hasLogo = !!layoutConfig?.logoUrl && logoPos && logoPos !== 'none';
+
+  // Build the lhead / rhead commands — logo replaces the text on its side when in header
+  const fancyhdrLines = [
+    (hasLogo && logoPos === 'header-left') ? '\\lhead{\\includegraphics[height=1cm]{logo}}' : `\\lhead{${hLeft}}`,
+    hCenter ? `\\chead{${hCenter}}` : null,
+    (hasLogo && logoPos === 'header-right') ? '\\rhead{\\includegraphics[height=1cm]{logo}}' : `\\rhead{${hRight}}`,
+    fLeft ? `\\lfoot{${fLeft}}` : null,
+    `\\cfoot{${fCenter}}`,
+    fRight ? `\\rfoot{${fRight}}` : null,
+  ].filter(Boolean).join('\n');
 
   return `\\documentclass[12pt,a4paper]{article}
 
@@ -359,13 +438,11 @@ ${fontPackage}
 
 \\pagestyle{fancy}
 \\fancyhf{}
-\\rhead{${escapeLatex(title)}}
-\\lhead{${escapeLatex(company)}}
-\\cfoot{\\thepage}
+${fancyhdrLines}
 
 \\begin{document}
 
-${buildCoverPage({ title, company, role, dates, customFields })}
+${buildCoverPage({ title, company, role, dates, customFields, logoUrl: (hasLogo && logoPos === 'cover') ? layoutConfig?.logoUrl : undefined, coverConfig: layoutConfig?.coverConfig })}
 
 \\tableofcontents
 \\newpage
@@ -373,13 +450,13 @@ ${buildCoverPage({ title, company, role, dates, customFields })}
 \\listoffigures
 \\newpage
 
-\\section{${sectionLabels.introduction}}
+\\section{${escapeLatex(introLabel)}}
 
 ${introduction}
 
 ${sectionContent}
 
-\\section{${sectionLabels.conclusion}}
+\\section{${escapeLatex(conclusionLabel)}}
 
 ${conclusion}
 
@@ -398,25 +475,45 @@ function buildCoverPage(params: {
   role: string;
   dates: string;
   customFields?: Record<string, { label: string; value: string }>;
+  logoUrl?: string;
+  coverConfig?: LayoutConfig['coverConfig'];
 }): string {
-  const { title, company, role, dates, customFields } = params;
+  const { title, company, role, dates, customFields, logoUrl, coverConfig } = params;
+  const titleSize = coverConfig?.titleSize ?? 'huge';
+  const roleSize = coverConfig?.roleSize ?? 'large';
+  const companySize = coverConfig?.companySize ?? 'normalsize';
+  const datesSize = coverConfig?.datesSize ?? 'normalsize';
+  const customFieldSize = coverConfig?.customFieldSize ?? 'small';
 
   const lines: string[] = [
     '\\begin{titlepage}',
     '  \\centering',
-    '  \\vspace*{5cm}',
-    `  {\\huge\\bfseries ${escapeLatex(title)}\\par}`,
+  ];
+
+  // Logo on cover page — right-aligned, before the vertical spacer
+  if (logoUrl) {
+    lines.push('  \\begin{flushright}');
+    lines.push('    \\includegraphics[height=2cm]{logo}');
+    lines.push('  \\end{flushright}');
+    lines.push('  \\vspace{1cm}');
+    lines.push('  \\vspace*{3cm}');
+  } else {
+    lines.push('  \\vspace*{5cm}');
+  }
+
+  lines.push(...[
+    `  {\\${titleSize}\\bfseries ${escapeLatex(title)}\\par}`,
     '  \\vspace{0.8cm}',
     '  \\noindent\\rule{0.5\\textwidth}{0.5pt}\\par',
     '  \\vspace{1.8cm}',
-  ];
+  ]);
 
   if (role) {
-    lines.push(`  {\\large ${escapeLatex(role)}\\par}`);
+    lines.push(`  {\\${roleSize} ${escapeLatex(role)}\\par}`);
     lines.push('  \\vspace{0.3cm}');
   }
   if (company) {
-    lines.push(`  {\\normalsize\\itshape ${escapeLatex(company)}\\par}`);
+    lines.push(`  {\\${companySize}\\itshape ${escapeLatex(company)}\\par}`);
   }
 
   // Show all custom fields the chat AI decided to collect — it already filters to only
@@ -426,7 +523,7 @@ function buildCoverPage(params: {
     if (coverEntries.length > 0) {
       lines.push('  \\vspace{0.6cm}');
       for (const entry of coverEntries) {
-        lines.push(`  {\\small\\textit{${escapeLatex(entry.label)}}: ${escapeLatex(entry.value)}\\par}`);
+        lines.push(`  {\\${customFieldSize}\\textit{${escapeLatex(entry.label)}}: ${escapeLatex(entry.value)}\\par}`);
         lines.push('  \\vspace{0.1cm}');
       }
     }
@@ -434,7 +531,7 @@ function buildCoverPage(params: {
 
   if (dates) {
     lines.push('  \\vspace{1.5cm}');
-    lines.push(`  {\\normalsize ${escapeLatex(dates)}\\par}`);
+    lines.push(`  {\\${datesSize} ${escapeLatex(dates)}\\par}`);
   }
 
   lines.push('  \\vfill');

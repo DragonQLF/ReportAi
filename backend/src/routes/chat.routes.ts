@@ -6,7 +6,7 @@ import { requireAuth } from '../middleware/auth';
 import { prisma } from '../utils/prisma';
 import { logger } from '../utils/logger';
 import { ForbiddenError } from '../utils/errors';
-import { editDocument as applyDocumentEdit } from '../pipeline/editor';
+import { editDocument as applyDocumentEdit, addScreenshotToReport, removeScreenshotFromReport, compileCurrentReport, setLogoFromImage } from '../pipeline/editor';
 import { chatSystemPrompt, editModeSystemPrompt } from '../pipeline/prompts';
 import { emitEditProgress } from '../utils/edit-progress';
 
@@ -47,6 +47,7 @@ router.post('/', requireAuth, async (req, res) => {
           title: true, company: true, role: true, dates: true,
           description: true, language: true, style: true,
           techStack: true, customFields: true, versions: true,
+          contextDocuments: true,
         },
       });
       if (existing && existing.userId !== req.user!.id) {
@@ -73,65 +74,194 @@ router.post('/', requireAuth, async (req, res) => {
 
         const modelMessages = await convertToModelMessages(messages);
 
+        // Tracks whether any edit tool ran so onFinish can do ONE deferred compile.
+        const pendingEdit = {
+          needed: false,
+          summaries: [] as string[],
+          toolsUsed: [] as Array<'editDocument' | 'addScreenshot' | 'removeScreenshot' | 'setLogo'>,
+        };
+
         const uiStream = createUIMessageStream({
           execute: async ({ writer }) => {
             const editStream = streamText({
               model: flashModel,
               system: editModeSystemPrompt(!!editImageUrl),
               messages: modelMessages,
-              stopWhen: stepCountIs(3), // respond → (optionally) call tool → follow-up
+              stopWhen: stepCountIs(5), // allows sequential tool calls (e.g. addScreenshot → editDocument → final response)
               tools: {
                 editDocument: tool({
-                  description: 'Edit the report. Call this for any requested change to content, structure, tone, length, or formatting.',
+                  description: 'Edit the report prose. Call this for text changes: rewriting, shortening, expanding, tone, adding a new section, translation, or formatting. Do NOT use this to add a screenshot — use addScreenshot for that.',
                   inputSchema: z.object({
                     instruction: z.string().describe('Clear, specific edit instruction to apply to the document'),
                   }),
                   execute: async ({ instruction }) => {
-                    const editResult = await applyDocumentEdit({
-                      reportId: existingReportId,
-                      message: instruction,
-                      imageUrl: editImageUrl,
-                      chatHistory,
-                      onProgress: (stage) => emitEditProgress(existingReportId, stage),
-                    });
+                    try {
+                      const editResult = await applyDocumentEdit({
+                        reportId: existingReportId,
+                        message: instruction,
+                        imageUrl: editImageUrl,
+                        chatHistory,
+                        onProgress: (stage) => emitEditProgress(existingReportId, stage),
+                        skipCompile: true,
+                      });
+                      emitEditProgress(existingReportId, null);
+                      pendingEdit.needed = true;
+                      pendingEdit.summaries.push(editResult.summary);
+                      pendingEdit.toolsUsed.push('editDocument');
+                      logger.info('Document edit applied via tool (compile deferred)', { reportId: existingReportId });
+                      return editResult.summary;
+                    } catch (err) {
+                      emitEditProgress(existingReportId, null);
+                      const message = err instanceof Error ? err.message : 'Unknown error';
+                      logger.error('editDocument tool failed', { reportId: existingReportId, error: message });
+                      return `Edit failed: ${message}`;
+                    }
+                  },
+                }),
+
+                addScreenshot: tool({
+                  description: 'Add a new screenshot/image into the report. Use this when the user uploads an image that should appear as a figure in the document.',
+                  inputSchema: z.object({
+                    note: z.string().optional().describe('Optional hint from the user about which section this screenshot belongs to'),
+                  }),
+                  execute: async ({ note }) => {
+                    if (!editImageUrl) return 'No image attached — cannot add screenshot';
+                    try {
+                      const addResult = await addScreenshotToReport({
+                        reportId: existingReportId,
+                        imageUrl: editImageUrl,
+                        note,
+                        chatHistory,
+                        onProgress: (stage) => emitEditProgress(existingReportId, stage),
+                        skipCompile: true,
+                      });
+                      emitEditProgress(existingReportId, null);
+                      pendingEdit.needed = true;
+                      pendingEdit.summaries.push(addResult.summary);
+                      pendingEdit.toolsUsed.push('addScreenshot');
+                      logger.info('Screenshot added via tool (compile deferred)', { reportId: existingReportId });
+                      return addResult.summary;
+                    } catch (err) {
+                      emitEditProgress(existingReportId, null);
+                      const message = err instanceof Error ? err.message : 'Unknown error';
+                      logger.error('addScreenshot tool failed', { reportId: existingReportId, error: message });
+                      return `Could not add screenshot: ${message}`;
+                    }
+                  },
+                }),
+
+                removeScreenshot: tool({
+                  description: 'Remove a screenshot/figure from the report. Use this when the user asks to remove, delete, or hide a specific screenshot.',
+                  inputSchema: z.object({
+                    identifier: z.string().describe('Natural-language description of which screenshot to remove (e.g. "the login page screenshot", "the dashboard figure")'),
+                  }),
+                  execute: async ({ identifier }) => {
+                    try {
+                      const removeResult = await removeScreenshotFromReport({
+                        reportId: existingReportId,
+                        identifier,
+                        chatHistory,
+                        onProgress: (stage) => emitEditProgress(existingReportId, stage),
+                        skipCompile: true,
+                      });
+                      emitEditProgress(existingReportId, null);
+                      pendingEdit.needed = true;
+                      pendingEdit.summaries.push(removeResult.summary);
+                      pendingEdit.toolsUsed.push('removeScreenshot');
+                      logger.info('Screenshot removed via tool (compile deferred)', { reportId: existingReportId });
+                      return removeResult.summary;
+                    } catch (err) {
+                      emitEditProgress(existingReportId, null);
+                      const message = err instanceof Error ? err.message : 'Unknown error';
+                      logger.error('removeScreenshot tool failed', { reportId: existingReportId, error: message });
+                      return `Could not remove screenshot: ${message}`;
+                    }
+                  },
+                }),
+
+                setLogo: tool({
+                  description: 'Set an uploaded image as the report logo. Call this when the user uploads something that is NOT a UI screenshot — e.g. a company logo, school emblem, university seal, badge, institution crest, profile photo for the cover, or any image NOT meant to appear as a numbered figure in the document body. Do NOT use addScreenshot for these.',
+                  inputSchema: z.object({
+                    position: z.enum(['cover', 'header-left', 'header-right'])
+                      .describe('Where to place the image: cover = full cover page logo, header-left/header-right = small logo in page header'),
+                  }),
+                  execute: async ({ position }) => {
+                    if (!editImageUrl) return 'No image attached — cannot set logo';
+                    try {
+                      const logoResult = await setLogoFromImage({
+                        reportId: existingReportId,
+                        imageUrl: editImageUrl,
+                        position,
+                        onProgress: (stage) => emitEditProgress(existingReportId, stage),
+                        skipCompile: true,
+                      });
+                      emitEditProgress(existingReportId, null);
+                      pendingEdit.needed = true;
+                      pendingEdit.summaries.push(logoResult.summary);
+                      pendingEdit.toolsUsed.push('setLogo');
+                      logger.info('Logo set via tool (compile deferred)', { reportId: existingReportId });
+                      return logoResult.summary;
+                    } catch (err) {
+                      emitEditProgress(existingReportId, null);
+                      const message = err instanceof Error ? err.message : 'Unknown error';
+                      logger.error('setLogo tool failed', { reportId: existingReportId, error: message });
+                      return `Could not set logo: ${message}`;
+                    }
+                  },
+                }),
+              },
+              onFinish: async ({ text, toolCalls, toolResults }) => {
+                // Deferred compile — runs once after all tools instead of once per tool.
+                // The SDK awaits onFinish before closing the stream, so the PDF is ready
+                // by the time the frontend's useChat.onFinish fires.
+                if (pendingEdit.needed) {
+                  try {
+                    emitEditProgress(existingReportId, 'compiling');
+                    const combinedSummary = pendingEdit.summaries.join('; ');
+                    const compiled = await compileCurrentReport(existingReportId, combinedSummary);
                     emitEditProgress(existingReportId, null);
 
-                    // Re-read versions fresh right before writing to minimise the stale-read window
                     type VersionEntry = { version: number; pdfUrl: string; texUrl?: string; createdAt: string; label?: string };
-                    const fresh = await prisma.report.findUnique({
-                      where: { id: existingReportId },
-                      select: { versions: true, pdfUrl: true },
-                    });
-                    const freshVersions: VersionEntry[] = Array.isArray(fresh?.versions) ? (fresh!.versions as VersionEntry[]) : [];
-                    const nextVersion = freshVersions.length > 0
-                      ? Math.max(...freshVersions.map((v) => v.version)) + 1
+                    const existingVersions: VersionEntry[] = Array.isArray(existing?.versions) ? (existing!.versions as VersionEntry[]) : [];
+                    const nextVersion = existingVersions.length > 0
+                      ? Math.max(...existingVersions.map((v) => v.version)) + 1
                       : 1;
-                    const editCount = freshVersions.filter((v) => v.label !== 'Original').length;
-                    const snapshot: VersionEntry | null = fresh?.pdfUrl
+                    const hasAdd = pendingEdit.toolsUsed.includes('addScreenshot');
+                    const hasRemove = pendingEdit.toolsUsed.includes('removeScreenshot');
+                    const hasLogo = pendingEdit.toolsUsed.includes('setLogo');
+                    const editCount = existingVersions.filter((v) => /^Edit \d+$/.test(v.label ?? '')).length;
+                    const label = existingVersions.length === 0 ? 'Original'
+                      : hasAdd ? 'Photo Added'
+                      : hasRemove ? 'Photo Removed'
+                      : hasLogo ? 'Logo Added'
+                      : `Edit ${editCount + 1}`;
+                    const snapshot: VersionEntry | null = existing?.pdfUrl
                       ? {
                           version: nextVersion,
-                          pdfUrl: fresh!.pdfUrl,
-                          texUrl: existing.texUrl ?? undefined,
+                          pdfUrl: existing!.pdfUrl,
+                          texUrl: existing?.texUrl ?? undefined,
                           createdAt: new Date().toISOString(),
-                          label: freshVersions.length === 0 ? 'Original' : `Edit ${editCount + 1}`,
+                          label,
                         }
                       : null;
 
                     await prisma.report.update({
                       where: { id: existingReportId },
                       data: {
-                        pdfUrl: editResult.pdfUrl ?? fresh?.pdfUrl ?? existing.pdfUrl,
-                        texUrl: editResult.texUrl,
-                        versions: snapshot ? [...freshVersions, snapshot] : freshVersions,
+                        pdfUrl: compiled.pdfUrl ?? existing?.pdfUrl ?? undefined,
+                        texUrl: compiled.texUrl,
+                        versions: snapshot ? [...existingVersions, snapshot] : existingVersions,
                       },
                     });
 
-                    logger.info('Document edit applied via tool', { reportId: existingReportId });
-                    return editResult.summary;
-                  },
-                }),
-              },
-              onFinish: async ({ text, toolCalls, toolResults }) => {
+                    logger.info('Deferred compile complete', { reportId: existingReportId, summary: combinedSummary });
+                  } catch (err) {
+                    emitEditProgress(existingReportId, null);
+                    logger.error('Deferred compile failed in onFinish', { reportId: existingReportId, error: err instanceof Error ? err.message : String(err) });
+                  }
+                }
+
+                // Save full chat history including AI response
                 const parts: Record<string, unknown>[] = [];
                 if (text) parts.push({ type: 'text', text });
                 for (const tc of toolCalls ?? []) {
@@ -141,7 +271,7 @@ router.post('/', requireAuth, async (req, res) => {
                     type: `tool-${tc.toolName}`,
                     toolName: tc.toolName,
                     toolCallId: tc.toolCallId,
-                    input: tc.args,
+                    input: tc.input,
                     output: tr?.result,
                     state: 'output-available',
                   });
@@ -182,6 +312,18 @@ router.post('/', requireAuth, async (req, res) => {
         }
         if (lines.length > 0) {
           systemPrompt += `\n\n**Already collected (do NOT ask for these again — treat them as confirmed):**\n${lines.join('\n')}`;
+        }
+
+        // Inject document context so the chat AI can reference uploaded files
+        type ContextDoc = { name: string; url: string; text: string };
+        const docs = Array.isArray(existing.contextDocuments)
+          ? (existing.contextDocuments as ContextDoc[]).filter((d) => d.text)
+          : [];
+        if (docs.length > 0) {
+          const docSection = docs
+            .map((d) => `[${d.name}]\n${d.text.slice(0, 2000)}${d.text.length > 2000 ? '\n...(truncated)' : ''}`)
+            .join('\n\n---\n\n');
+          systemPrompt += `\n\n**User-uploaded reference documents (use these to understand the project and fill in fields):**\n${docSection}`;
         }
       }
     }
@@ -226,7 +368,7 @@ router.post('/', requireAuth, async (req, res) => {
             type: `tool-${tc.toolName}`,
             toolName: tc.toolName,
             toolCallId: tc.toolCallId,
-            input: tc.args,
+            input: tc.input,
             output: tr?.result,
             state: 'output-available',
           });

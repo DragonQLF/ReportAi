@@ -19,6 +19,8 @@ interface WriterInput {
     style: string;
     language: string;
     customFields?: Record<string, { label: string; value: string }>;
+    /** Per-section document excerpts from the document mapping pass */
+    documentContext?: Record<string, string>;
   };
 }
 
@@ -80,6 +82,7 @@ export async function writeSections(input: WriterInput): Promise<WriterOutput> {
             style: context.style,
             language: context.language,
             customFields: context.customFields,
+            documentContext: context.documentContext?.[section.name],
           });
 
           logger.debug('Writing section', { sectionName: section.name });

@@ -127,12 +127,14 @@ export async function reviewScreenshots(input: ReviewInput): Promise<ReviewOutpu
 
 /**
  * Compute blur score and perceptual hash in a single sharp decode.
+ * Exported so the editor can reuse it for single-image blur + dedup checks without
+ * running the full batch reviewer.
  *
  * Decodes the image once to 256x256 grayscale for the Laplacian blur analysis,
  * then re-uses that raw pixel data (resized to 8x8) for the perceptual hash —
  * avoiding a second full decode of the original compressed image.
  */
-async function computeImageMetrics(imageBuffer: Buffer): Promise<{ blurScore: number; hash: string }> {
+export async function computeImageMetrics(imageBuffer: Buffer): Promise<{ blurScore: number; hash: string }> {
   try {
     // Decode once to 256x256 grayscale raw pixels
     const { data: blurData, info } = await sharp(imageBuffer)
@@ -196,7 +198,7 @@ async function computeImageMetrics(imageBuffer: Buffer): Promise<{ blurScore: nu
  * Returns a value between 0 (completely different) and 1 (identical).
  * Uses string-based Hamming distance — no integer conversion, no overflow risk.
  */
-function computeHashSimilarity(hash1: string, hash2: string): number {
+export function computeHashSimilarity(hash1: string, hash2: string): number {
   if (hash1.length !== hash2.length) return 0;
 
   let matchingBits = 0;

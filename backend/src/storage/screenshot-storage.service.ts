@@ -109,6 +109,20 @@ export async function uploadOutput(
 }
 
 /**
+ * Upload a user-provided reference document (PDF, text) to R2 or local filesystem.
+ */
+export async function uploadDocumentFile(
+  buffer: Buffer,
+  options: { reportId: string; filename: string; contentType: string },
+): Promise<string> {
+  return uploadOutput(buffer, {
+    reportId: options.reportId,
+    filename: `documents/${options.filename}`,
+    contentType: options.contentType,
+  });
+}
+
+/**
  * Delete a file by its public URL from R2 or local filesystem.
  */
 export async function deleteStorageFile(url: string): Promise<void> {

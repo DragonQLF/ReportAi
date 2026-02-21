@@ -84,6 +84,12 @@ model Report {
   // Domain-specific extra fields collected by AI (e.g. specialty, medium, project type)
   customFields Json    @default("{}")
 
+  // Header/footer text overrides and logo configuration
+  layoutConfig Json    @default("{}")
+
+  // User-uploaded reference documents (PDFs, text files) — [{name, url, text}]
+  contextDocuments Json @default("[]")
+
   // Chat history — persisted so users can return to the conversation
   chatMessages Json    @default("[]")
 
@@ -120,5 +126,6 @@ model Screenshot {
   blurScore   Float?
   createdAt   DateTime @default(now())
 
+  @@unique([reportId, index])
   @@index([reportId, index])
 }

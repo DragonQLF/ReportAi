@@ -67,6 +67,41 @@ export interface ReportVersion {
   label?: string;
 }
 
+export interface SectionContentSection {
+  sectionName: string;
+  content: string;
+  screenshotIndices: number[];
+  screenshotPairs?: [number, number][];
+}
+
+export interface LayoutConfig {
+  header?: { left?: string; center?: string; right?: string };
+  footer?: { left?: string; center?: string; right?: string };
+  logoUrl?: string;
+  logoPosition?: "header-left" | "header-right" | "cover" | "none";
+  coverConfig?: {
+    titleSize?: string;
+    companySize?: string;
+    roleSize?: string;
+    datesSize?: string;
+    customFieldSize?: string;
+  };
+}
+
+export interface SectionContent {
+  introduction: string;
+  introductionTitle?: string;
+  sections: SectionContentSection[];
+  conclusion: string;
+  conclusionTitle?: string;
+}
+
+export interface ContextDocument {
+  name: string;
+  url: string;
+  text: string;
+}
+
 export interface Report {
   id: string;
   title?: string;
@@ -79,7 +114,10 @@ export interface Report {
   style: string;
   font?: string;
   customFields?: Record<string, CustomFieldValue>;
+  layoutConfig?: LayoutConfig;
   chatMessages?: unknown[];
+  sectionContent?: SectionContent | null;
+  contextDocuments?: ContextDocument[];
   status: "pending" | "queued" | "reviewing" | "processing" | "writing" | "compiling" | "completed" | "failed";
   pdfUrl?: string;
   texUrl?: string;
@@ -147,6 +185,11 @@ export const api = {
 
   generateReport: (id: string) =>
     request<{ success: boolean; message: string }>(`/api/reports/${id}/generate`, { method: "POST" }),
+
+  compileReport: async (id: string) => {
+    const res = await request<{ success: boolean; data: { pdfUrl?: string; texUrl: string } }>(`/api/reports/${id}/compile`, { method: "POST" });
+    return res.data;
+  },
 
   getReportStatus: async (id: string) => {
     const res = await request<{ success: boolean; data: ReportStatus }>(`/api/reports/${id}/status`);
@@ -241,15 +284,79 @@ export const api = {
     id: string,
     onUpdate: (stage: string | null) => void,
   ): (() => void) => {
-    const es = new EventSource(`${API_URL}/api/reports/${id}/edit-progress`, { withCredentials: true });
-    es.onmessage = (e) => {
-      try {
-        const { stage } = JSON.parse(e.data) as { stage: string | null };
-        onUpdate(stage);
-      } catch { /* ignore parse errors */ }
+    let es: EventSource | null = null;
+    let closed = false;
+    let retries = 0;
+    const MAX_RETRIES = 4;
+
+    const connect = () => {
+      if (closed) return;
+      es = new EventSource(`${API_URL}/api/reports/${id}/edit-progress`, { withCredentials: true });
+      es.onmessage = (e) => {
+        retries = 0;
+        try {
+          const { stage } = JSON.parse(e.data) as { stage: string | null };
+          onUpdate(stage);
+        } catch { /* ignore parse errors */ }
+      };
+      es.onerror = () => {
+        es?.close();
+        es = null;
+        if (closed) return;
+        if (retries < MAX_RETRIES) {
+          setTimeout(connect, Math.min(1000 * 2 ** retries, 10_000));
+          retries++;
+        }
+      };
     };
-    return () => es.close();
+
+    connect();
+    return () => { closed = true; es?.close(); };
   },
+
+  /**
+   * Upload a reference document (PDF or text) for context injection during generation.
+   * Returns the saved ContextDocument record.
+   */
+  uploadDocument: async (reportId: string, file: File): Promise<ContextDocument> => {
+    const formData = new FormData();
+    formData.append("document", file);
+
+    const response = await fetch(`${API_URL}/api/upload/${reportId}/document`, {
+      method: "POST",
+      credentials: "include",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new ApiError(data?.message || "Document upload failed", response.status, data);
+    }
+
+    const result = await response.json() as { data: { document: ContextDocument } };
+    return result.data.document;
+  },
+
+  deleteDocument: (reportId: string, docIndex: number) =>
+    request<void>(`/api/upload/${reportId}/document/${docIndex}`, { method: "DELETE" }),
+
+  uploadLogo: async (reportId: string, file: File): Promise<{ logoUrl: string }> => {
+    const formData = new FormData();
+    formData.append("logo", file);
+    const response = await fetch(`${API_URL}/api/upload/${reportId}/logo`, {
+      method: "POST",
+      credentials: "include",
+      body: formData,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new ApiError(data?.message || "Logo upload failed", response.status, data);
+    }
+    return response.json() as Promise<{ logoUrl: string }>;
+  },
+
+  deleteLogo: (reportId: string) =>
+    request<void>(`/api/upload/${reportId}/logo`, { method: "DELETE" }),
 
   /**
    * Upload a single image for use in document editing (reuses the existing upload route).
@@ -270,8 +377,8 @@ export const api = {
       throw new ApiError(data?.message || "Upload failed", response.status, data);
     }
 
-    const result = await response.json() as { screenshots: { url: string }[] };
-    const url = result.screenshots?.[0]?.url;
+    const result = await response.json() as { data: { screenshots: { url: string }[] } };
+    const url = result.data?.screenshots?.[0]?.url;
     if (!url) throw new ApiError("Upload returned no URL", 500);
     return url;
   },

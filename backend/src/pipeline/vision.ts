@@ -66,7 +66,6 @@ export async function analyzeScreenshots(input: VisionInput): Promise<Screenshot
 
         const result = await generateText({
           model: flashModel,
-          // @ts-expect-error — Output.object deep type recursion with complex Zod schemas
           output: Output.object({ schema: screenshotAnalysisItemSchema }),
           messages: [
             {
