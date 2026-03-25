@@ -1,5 +1,11 @@
 # ReportAI
 
+<!-- Landing page preview -->
+
+<p align="center">
+  <img src="./assets/landing.webp" alt="ReportAI landing page" width="900" />
+</p>
+
 **Turn your app screenshots into a professional PDF report — automatically.**
 
 Upload screenshots or a screen recording of your project. AI analyzes what you built, groups features into sections, writes the report, and exports a polished PDF. Ready to hand in.
