@@ -78,7 +78,12 @@ export interface LayoutConfig {
   header?: { left?: string; center?: string; right?: string };
   footer?: { left?: string; center?: string; right?: string };
   logoUrl?: string;
-  logoPosition?: "header-left" | "header-right" | "cover" | "none";
+  logoPosition?:
+    | "header-left" | "header-right"
+    | "cover"
+    | "cover-top-left" | "cover-top-center" | "cover-top-right"
+    | "cover-bottom-left" | "cover-bottom-center" | "cover-bottom-right"
+    | "none";
   coverConfig?: {
     titleSize?: string;
     companySize?: string;

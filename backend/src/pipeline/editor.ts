@@ -75,7 +75,13 @@ const editSectionsResultSchema = z.object({
   layoutConfig: z.object({
     header: z.object({ left: z.string(), center: z.string(), right: z.string() }).optional(),
     footer: z.object({ left: z.string(), center: z.string(), right: z.string() }).optional(),
-    logoPosition: z.enum(['header-left', 'header-right', 'cover', 'none']).optional(),
+    logoPosition: z.enum([
+      'header-left', 'header-right',
+      'cover',
+      'cover-top-left', 'cover-top-center', 'cover-top-right',
+      'cover-bottom-left', 'cover-bottom-center', 'cover-bottom-right',
+      'none',
+    ]).optional(),
   }).optional().describe('Header/footer text and logo position updates. Only include when the user explicitly requests layout changes.'),
 });
 

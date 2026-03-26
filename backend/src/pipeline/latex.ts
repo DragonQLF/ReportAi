@@ -16,7 +16,12 @@ export interface LayoutConfig {
   header?: { left?: string; center?: string; right?: string };
   footer?: { left?: string; center?: string; right?: string };
   logoUrl?: string;
-  logoPosition?: 'header-left' | 'header-right' | 'cover' | 'none';
+  logoPosition?:
+    | 'header-left' | 'header-right'
+    | 'cover'                                            // legacy alias → cover-top-right
+    | 'cover-top-left' | 'cover-top-center' | 'cover-top-right'
+    | 'cover-bottom-left' | 'cover-bottom-center' | 'cover-bottom-right'
+    | 'none';
   coverConfig?: {
     titleSize?: string;      // huge | LARGE | Large | large | normalsize
     companySize?: string;    // Large | large | normalsize | small
@@ -379,7 +384,11 @@ export function buildLatexDocument(params: {
       const pairedSeconds = new Set(pairs.map(([, b]) => b));
       const pairMap = new Map(pairs.map(([a, b]) => [a, b]));
 
-      const figures = section.screenshotIndices
+      // If content already contains inline \begin{figure} blocks (TipTap editor path),
+      // skip appending separate figures to avoid double-rendering.
+      const hasInlineFigures = section.content.includes('\\begin{figure}');
+
+      const figures = hasInlineFigures ? '' : section.screenshotIndices
         .filter((idx) => !pairedSeconds.has(idx))
         .map((idx) => {
           const partner = pairMap.get(idx);
@@ -407,6 +416,7 @@ ${figures}`;
 
   const logoPos = layoutConfig?.logoPosition;
   const hasLogo = !!layoutConfig?.logoUrl && logoPos && logoPos !== 'none';
+  const isCoverLogo = hasLogo && (logoPos === 'cover' || logoPos?.startsWith('cover-'));
 
   // Build the lhead / rhead commands — logo replaces the text on its side when in header
   const fancyhdrLines = [
@@ -442,7 +452,7 @@ ${fancyhdrLines}
 
 \\begin{document}
 
-${buildCoverPage({ title, company, role, dates, customFields, logoUrl: (hasLogo && logoPos === 'cover') ? layoutConfig?.logoUrl : undefined, coverConfig: layoutConfig?.coverConfig })}
+${buildCoverPage({ title, company, role, dates, customFields, logoUrl: isCoverLogo ? layoutConfig?.logoUrl : undefined, coverLogoPosition: logoPos, coverConfig: layoutConfig?.coverConfig })}
 
 \\tableofcontents
 \\newpage
@@ -476,26 +486,37 @@ function buildCoverPage(params: {
   dates: string;
   customFields?: Record<string, { label: string; value: string }>;
   logoUrl?: string;
+  coverLogoPosition?: string;
   coverConfig?: LayoutConfig['coverConfig'];
 }): string {
-  const { title, company, role, dates, customFields, logoUrl, coverConfig } = params;
+  const { title, company, role, dates, customFields, logoUrl, coverLogoPosition, coverConfig } = params;
   const titleSize = coverConfig?.titleSize ?? 'huge';
   const roleSize = coverConfig?.roleSize ?? 'large';
   const companySize = coverConfig?.companySize ?? 'normalsize';
   const datesSize = coverConfig?.datesSize ?? 'normalsize';
   const customFieldSize = coverConfig?.customFieldSize ?? 'small';
 
+  // Derive horizontal alignment and vertical zone from position string.
+  // 'cover' is a legacy alias for 'cover-top-right'.
+  const effectivePos = coverLogoPosition === 'cover' ? 'cover-top-right' : (coverLogoPosition ?? 'cover-top-right');
+  const [, zone = 'top', align = 'right'] = effectivePos.match(/^cover-(top|bottom)-(left|center|right)$/) ?? [];
+  const alignCmd = align === 'left' ? 'flushleft' : align === 'center' ? 'center' : 'flushright';
+
+  const logoSnippet = (extraVspace?: string) => [
+    `  \\begin{${alignCmd}}`,
+    '    \\includegraphics[height=2cm]{logo}',
+    `  \\end{${alignCmd}}`,
+    ...(extraVspace ? [`  \\vspace{${extraVspace}}`] : []),
+  ];
+
   const lines: string[] = [
     '\\begin{titlepage}',
     '  \\centering',
   ];
 
-  // Logo on cover page — right-aligned, before the vertical spacer
-  if (logoUrl) {
-    lines.push('  \\begin{flushright}');
-    lines.push('    \\includegraphics[height=2cm]{logo}');
-    lines.push('  \\end{flushright}');
-    lines.push('  \\vspace{1cm}');
+  // Top-zone logo: rendered before the title, followed by reduced vspace
+  if (logoUrl && zone === 'top') {
+    lines.push(...logoSnippet('1cm'));
     lines.push('  \\vspace*{3cm}');
   } else {
     lines.push('  \\vspace*{5cm}');
@@ -535,6 +556,12 @@ function buildCoverPage(params: {
   }
 
   lines.push('  \\vfill');
+
+  // Bottom-zone logo: rendered at the base of the page before the closing rule
+  if (logoUrl && zone === 'bottom') {
+    lines.push(...logoSnippet('0.5cm'));
+  }
+
   lines.push('  \\noindent\\rule{\\textwidth}{0.4pt}');
   lines.push('\\end{titlepage}');
 

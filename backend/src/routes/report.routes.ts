@@ -43,6 +43,7 @@ const sectionContentSchema = z.object({
     sectionName: z.string(),
     content: z.string(),
     screenshotIndices: z.array(z.number()),
+    screenshotPairs: z.array(z.array(z.number())).optional(),
   })),
   conclusion: z.string(),
   conclusionTitle: z.string().optional(),
